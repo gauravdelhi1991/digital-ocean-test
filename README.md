@@ -68,13 +68,13 @@ The initial configuration uses a single-node PostgreSQL plan (`db-s-1vcpu-1gb`, 
 
 1. Connect `gauravdelhi1991/digital-ocean-test` to DigitalOcean App Platform in the DigitalOcean control panel. This authorizes App Platform to build the private GitHub repository. Terraform creates a DigitalOcean project named `Digital Ocean Test` and assigns the API and database to it.
 2. Create a persistent DigitalOcean API token and a Spaces access key in the control panel. Add them as GitHub Actions repository secrets named `DIGITALOCEAN_TOKEN`, `DO_SPACES_ACCESS_KEY_ID`, and `DO_SPACES_SECRET_ACCESS_KEY`. Do not paste or commit credentials.
-3. In GitHub **Settings → Environments**, create `digitalocean-production` and configure a required reviewer. The apply job pauses there until a reviewer approves it.
+3. In GitHub **Settings → Environments**, create `digitalocean-production` and restrict deployments to the `main` branch. This is a branch restriction, not an approval gate. GitHub Free does not offer required reviewers for private repositories. The workflow therefore requires a separate, manually dispatched apply run with explicit confirmation; this is a deliberate operator action, not an independent reviewer approval.
 
 ### Provision
 
 1. Run **Actions → Bootstrap Terraform State Storage → Run workflow**. It creates the private `digital-ocean-test-tfstate-821117` Spaces bucket in `nyc3` if it does not already exist. This starts the Spaces subscription if the account does not already have one.
-2. Run **Actions → Deploy DigitalOcean Infrastructure → Run workflow** with `operation: plan`. Review the generated plan and the cost estimate above.
-3. When ready, run the same workflow with `operation: apply`; approve the protected `digitalocean-production` environment. Terraform applies the reviewed plan to provision the database and API. The database cluster has `prevent_destroy` protection against accidental removal.
+2. Run **Actions → Deploy DigitalOcean Infrastructure → Run workflow** with `operation: plan`. Review the resource changes in the completed run’s summary and compare them with the approximate monthly estimate above and current DigitalOcean prices. Note the plan run’s ID. The plan artifact expires after one day.
+3. Only after reviewing, run the same workflow from the same `main` commit with `operation: apply`, enter the plan run ID, and set `confirm_plan: yes`. The workflow verifies that the earlier plan run succeeded on the same commit and applies that exact saved plan; it does not silently generate and apply a new plan. The database cluster has `prevent_destroy` protection against accidental removal.
 4. After the app deployment completes, verify `https://<app-domain>/health/ready`.
 
 The API uses the managed cluster’s default database account for its first migration and runtime connection. Restrict database access to the App Platform app using the managed database firewall. Before handling sensitive production workloads, introduce a least-privilege application database role and a separate migration credential.

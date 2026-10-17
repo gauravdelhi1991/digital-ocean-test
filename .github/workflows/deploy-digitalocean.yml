@@ -4,16 +4,29 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: "Run a read-only plan first; choose apply only after reviewing the plan and costs."
+        description: "Create a plan for review, or apply a previously reviewed plan."
         required: true
         type: choice
         options:
           - plan
           - apply
         default: plan
+      plan_run_id:
+        description: "For apply only: run ID of a successful plan on this exact main-branch commit."
+        required: false
+        type: string
+      confirm_plan:
+        description: "Set to yes only after reviewing the plan and approving its estimated cost."
+        required: true
+        type: choice
+        options:
+          - no
+          - yes
+        default: no
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: digitalocean-terraform
@@ -21,6 +34,7 @@ concurrency:
 
 jobs:
   plan:
+    if: github.ref == 'refs/heads/main' && inputs.operation == 'plan'
     runs-on: ubuntu-latest
     env:
       TF_VAR_digitalocean_token: ${{ secrets.DIGITALOCEAN_TOKEN }}
@@ -46,16 +60,22 @@ jobs:
         run: |
           terraform -chdir=terraform plan -input=false -no-color -out=tfplan
           terraform -chdir=terraform show -no-color tfplan >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "$GITHUB_SHA" > terraform/plan-commit.txt
       - uses: actions/upload-artifact@v4
         with:
           name: digitalocean-terraform-plan
-          path: terraform/tfplan
+          path: |
+            terraform/tfplan
+            terraform/plan-commit.txt
           if-no-files-found: error
           retention-days: 1
 
   apply:
-    if: inputs.operation == 'apply'
-    needs: plan
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      inputs.operation == 'apply' &&
+      inputs.confirm_plan == 'yes' &&
+      inputs.plan_run_id != ''
     runs-on: ubuntu-latest
     environment: digitalocean-production
     env:
@@ -69,11 +89,40 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.11.4
+      - name: Verify reviewed plan run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLAN_RUN_ID: ${{ inputs.plan_run_id }}
+        run: |
+          if ! [[ "$PLAN_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "plan_run_id must be the numeric ID of a successful plan run."
+            exit 1
+          fi
+          run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PLAN_RUN_ID")"
+          jq -e \
+            --arg sha "$GITHUB_SHA" \
+            '.head_branch == "main" and
+             .head_sha == $sha and
+             .status == "completed" and
+             .conclusion == "success" and
+             .path == ".github/workflows/deploy-digitalocean.yml"' \
+            <<< "$run_json" > /dev/null
       - name: Initialize remote state
         run: terraform -chdir=terraform init -input=false -lockfile=readonly
       - uses: actions/download-artifact@v4
         with:
           name: digitalocean-terraform-plan
           path: terraform
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.plan_run_id }}
+      - name: Verify plan matches this commit
+        env:
+          PLAN_RUN_ID: ${{ inputs.plan_run_id }}
+        run: |
+          test "$(cat terraform/plan-commit.txt)" = "$GITHUB_SHA" || {
+            echo "The reviewed plan was created from a different commit. Create and review a new plan."
+            exit 1
+          }
       - name: Apply reviewed plan
         run: terraform -chdir=terraform apply -input=false -auto-approve tfplan
