@@ -1,6 +1,6 @@
 # Digital Ocean Test
 
-A TypeScript REST API that durably accepts job submissions in PostgreSQL. This first milestone stores jobs as `accepted`; it does not enqueue or execute them yet. Redis, workers, retries, scheduling, and status/result lookup are later milestones described in [DESIGN.md](./DESIGN.md).
+A TypeScript REST API, deployed as an App Platform service, that durably accepts job submissions in PostgreSQL. This first milestone stores jobs as `accepted`; it does not enqueue or execute them yet. Later, a separate App Platform worker will consume Redis jobs and execute the handlers itself. DigitalOcean Functions are not used. Redis, workers, retries, scheduling, and status/result lookup are later milestones described in [DESIGN.md](./DESIGN.md).
 
 ## Requirements
 
@@ -73,7 +73,7 @@ The initial configuration uses a single-node PostgreSQL plan (`db-s-1vcpu-1gb`, 
 ### Provision
 
 1. Run **Actions → Bootstrap Terraform State Storage → Run workflow**. It creates the private `digital-ocean-test-tfstate-821117` Spaces bucket in `nyc3` if it does not already exist. This starts the Spaces subscription if the account does not already have one.
-2. Run **Actions → Deploy DigitalOcean Infrastructure → Run workflow** with `operation: plan`. Review the resource changes in the completed run’s summary and compare them with the approximate monthly estimate above and current DigitalOcean prices. Note the plan run’s ID. The plan artifact expires after one day.
+2. Run **Actions → Deploy DigitalOcean Infrastructure → Run workflow** with `operation: plan`. By default, `deployment_branch` is `main`; to test a feature branch, select it here while launching the workflow from `main`. Review the app source branch and commit along with the resource changes in the completed run’s summary, and compare the plan with the approximate monthly estimate above and current DigitalOcean prices. Note the plan run’s ID. The plan artifact expires after one day; apply is rejected if either the infrastructure commit or selected application branch commit changes.
 3. Only after reviewing, run the same workflow from the same `main` commit with `operation: apply`, enter the plan run ID, and set `confirm_plan: yes`. The workflow verifies that the earlier plan run succeeded on the same commit and applies that exact saved plan; it does not silently generate and apply a new plan. The database cluster has `prevent_destroy` protection against accidental removal.
 4. After the app deployment completes, verify `https://<app-domain>/health/ready`.
 
@@ -92,4 +92,4 @@ The API container applies the idempotent migration before starting, using a Post
 
 ## Worker configuration and high load
 
-There are no workers or queue settings in this first milestone. Later milestones add Redis/BullMQ, separately scalable worker processes, handler concurrency, retry/backoff and timeout policies, and dead-letter tracking. For high load, scale API instances independently from workers, use connection pooling and queue backpressure, cap request/payload sizes, and monitor queue lag and p95 job latency. Large job data should be stored as object-storage references rather than embedded in the request.
+There are no workers or queue settings in this first milestone. Later milestones add Redis/BullMQ and a separate App Platform worker component that consumes jobs from Redis and executes handlers itself. Scale that worker pool independently from the API service. Add handler concurrency, retry/backoff and timeout policies, and dead-letter tracking. For high load, use connection pooling and queue backpressure, cap request/payload sizes, and monitor queue lag and p95 job latency. Large job data should be stored as object-storage references rather than embedded in the request.

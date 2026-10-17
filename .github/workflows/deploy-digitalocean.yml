@@ -11,8 +11,13 @@ on:
           - plan
           - apply
         default: plan
+      deployment_branch:
+        description: "GitHub branch App Platform should build and deploy."
+        required: true
+        type: string
+        default: main
       plan_run_id:
-        description: "For apply only: run ID of a successful plan on this exact main-branch commit."
+        description: "For apply only: run ID of a successful plan on this exact main-branch commit and deployment branch."
         required: false
         type: string
       confirm_plan:
@@ -48,10 +53,20 @@ jobs:
         with:
           terraform_version: 1.11.4
       - name: Check required credentials
+        env:
+          DEPLOYMENT_BRANCH: ${{ inputs.deployment_branch }}
         run: |
           test -n "$TF_VAR_digitalocean_token" || { echo "Missing DIGITALOCEAN_TOKEN secret"; exit 1; }
           test -n "$AWS_ACCESS_KEY_ID" || { echo "Missing DO_SPACES_ACCESS_KEY_ID secret"; exit 1; }
           test -n "$AWS_SECRET_ACCESS_KEY" || { echo "Missing DO_SPACES_SECRET_ACCESS_KEY secret"; exit 1; }
+          git check-ref-format --branch "$DEPLOYMENT_BRANCH" || {
+            echo "deployment_branch must be a valid Git branch name."
+            exit 1
+          }
+          git ls-remote --exit-code --heads origin "refs/heads/$DEPLOYMENT_BRANCH" > /dev/null || {
+            echo "deployment_branch must exist in this GitHub repository."
+            exit 1
+          }
       - name: Initialize remote state
         run: terraform -chdir=terraform init -input=false -lockfile=readonly
       - name: Validate configuration
@@ -61,12 +76,30 @@ jobs:
           terraform -chdir=terraform plan -input=false -no-color -out=tfplan
           terraform -chdir=terraform show -no-color tfplan >> "$GITHUB_STEP_SUMMARY"
           printf '%s\n' "$GITHUB_SHA" > terraform/plan-commit.txt
+          printf '%s\n' "$DEPLOYMENT_BRANCH" > terraform/plan-deployment-branch.txt
+          deployment_sha="$(git ls-remote --exit-code origin "refs/heads/$DEPLOYMENT_BRANCH" | cut -f1)"
+          test -n "$deployment_sha" || {
+            echo "Unable to resolve deployment branch commit."
+            exit 1
+          }
+          printf '%s\n' "$deployment_sha" > terraform/plan-deployment-sha.txt
+          {
+            echo "## App source"
+            echo
+            echo "- Branch: \`$DEPLOYMENT_BRANCH\`"
+            echo "- Commit: \`$deployment_sha\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          DEPLOYMENT_BRANCH: ${{ inputs.deployment_branch }}
+          TF_VAR_github_branch: ${{ inputs.deployment_branch }}
       - uses: actions/upload-artifact@v4
         with:
           name: digitalocean-terraform-plan
           path: |
             terraform/tfplan
             terraform/plan-commit.txt
+            terraform/plan-deployment-branch.txt
+            terraform/plan-deployment-sha.txt
           if-no-files-found: error
           retention-days: 1
 
@@ -93,6 +126,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PLAN_RUN_ID: ${{ inputs.plan_run_id }}
+          DEPLOYMENT_BRANCH: ${{ inputs.deployment_branch }}
         run: |
           if ! [[ "$PLAN_RUN_ID" =~ ^[0-9]+$ ]]; then
             echo "plan_run_id must be the numeric ID of a successful plan run."
@@ -101,8 +135,10 @@ jobs:
           run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PLAN_RUN_ID")"
           jq -e \
             --arg sha "$GITHUB_SHA" \
+            --arg branch "$GITHUB_REF_NAME" \
             '.head_branch == "main" and
              .head_sha == $sha and
+             .head_branch == $branch and
              .status == "completed" and
              .conclusion == "success" and
              .path == ".github/workflows/deploy-digitalocean.yml"' \
@@ -118,10 +154,19 @@ jobs:
           run-id: ${{ inputs.plan_run_id }}
       - name: Verify plan matches this commit
         env:
-          PLAN_RUN_ID: ${{ inputs.plan_run_id }}
+          DEPLOYMENT_BRANCH: ${{ inputs.deployment_branch }}
         run: |
           test "$(cat terraform/plan-commit.txt)" = "$GITHUB_SHA" || {
             echo "The reviewed plan was created from a different commit. Create and review a new plan."
+            exit 1
+          }
+          test "$(cat terraform/plan-deployment-branch.txt)" = "$DEPLOYMENT_BRANCH" || {
+            echo "The deployment branch differs from the reviewed plan. Create and review a new plan."
+            exit 1
+          }
+          current_deployment_sha="$(git ls-remote --exit-code origin "refs/heads/$DEPLOYMENT_BRANCH" | cut -f1)"
+          test "$(cat terraform/plan-deployment-sha.txt)" = "$current_deployment_sha" || {
+            echo "The deployment branch changed after the plan. Create and review a new plan."
             exit 1
           }
       - name: Apply reviewed plan

@@ -6,7 +6,7 @@ Build a production-ready REST API for accepting jobs, executing them asynchronou
 
 ## Architecture
 
-Use TypeScript with Fastify for the HTTP API, PostgreSQL as the durable job registry and result store, Redis with BullMQ for asynchronous delivery, and separate worker and scheduler processes. Deploy the API and managed PostgreSQL on DigitalOcean first; add Redis and independently scalable workers in later increments. Keep infrastructure in Terraform and use GitHub Actions for CI, remote-state bootstrap, and manually triggered, gated Terraform plans/applies. Store Terraform state in a private DigitalOcean Spaces bucket.
+Use TypeScript with Fastify for the HTTP API, PostgreSQL as the durable job registry and result store, Redis with BullMQ for asynchronous delivery, and separate worker and scheduler processes. Host the HTTP API as an App Platform service backed by PostgreSQL. Add a distinct App Platform worker component later; that long-running worker will consume Redis messages and execute handlers itself. Add Redis and independently scalable workers in later increments. Keep infrastructure in Terraform and use GitHub Actions for CI, remote-state bootstrap, and manually triggered Terraform plans/applies. Store Terraform state in a private DigitalOcean Spaces bucket. DigitalOcean Functions are not part of this design.
 
 ```text
 Client
@@ -68,7 +68,7 @@ The PostgreSQL `jobs` table stores payload, scheduling/execution options, status
 ## DigitalOcean and delivery pipeline
 
 - Run a stateless API service and managed PostgreSQL on DigitalOcean, grouped in a dedicated DigitalOcean Project. Keep credentials out of source control and inject them using DigitalOcean secrets.
-- Scale the API and worker pool independently. Add managed Redis before enabling asynchronous execution.
+- Scale the API and worker pool independently. Add managed Redis before enabling asynchronous execution. The App Platform worker consumes Redis and executes handlers itself; it does not invoke a Function per job.
 - Track DigitalOcean infrastructure in Terraform. GitHub Actions validates, tests, and builds on pushes and pull requests. A manually triggered workflow creates a Spaces state bucket and runs Terraform plan/apply; applying requires an explicitly protected GitHub environment and DigitalOcean/Spaces secrets.
 - Configure database backups, connection limits/pooling, health checks, migrations, and alerting before production traffic.
 
@@ -82,7 +82,7 @@ Scale worker replicas independently according to backlog and utilization. Apply 
 2. **Expand CI and release safeguards.** Add broader PostgreSQL-backed integration coverage, branch protection, deployment verification, and release promotion practices to the existing GitHub Actions CI and gated infrastructure workflow.
 3. **Add status and result APIs.** Return complete lifecycle state, attempt count, errors, results, and timestamps with correct transitions and tests.
 4. **Add Redis, reliable publication, and transactional outbox.** Provision managed Redis; atomically persist jobs and outbox intents; retry publishing safely and test Redis outages/restarts.
-5. **Implement independently deployable workers.** Add pluggable typed handlers, job claiming, durable attempt state, acknowledgements, and crash/redelivery integration tests.
+5. **Implement independently deployable App Platform workers.** Add the separate worker component and pluggable typed handlers; consume Redis jobs directly, record durable attempt state, acknowledge messages safely, and test crash/redelivery behavior.
 6. **Add timeouts, retry/backoff, and dead-letter handling.** Test retry classification, attempt limits, timeouts, permanent failures, and dead-letter retention.
 7. **Add queue visibility and operational controls.** Report backlog depth/lag, support cancellation and drain/resume, and secure operator endpoints.
 8. **Add delayed and recurring scheduling.** Persist schedules, run a recoverable scheduler, publish jobs no earlier than their due time, and define missed/overlapping run behavior.
