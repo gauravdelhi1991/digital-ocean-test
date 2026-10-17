@@ -232,5 +232,5 @@ jobs:
       - uses: digitalocean/action-doctl@v2
         with:
           token: ${{ secrets.DIGITALOCEAN_TOKEN }}
-      - name: Fetch API crash logs
-        run: doctl apps logs "$APP_ID" api --type=run_restarted --deployment="$DEPLOYMENT_ID" --tail=100
+      - name: Fetch API deploy logs
+        run: doctl apps logs "$APP_ID" api --type=deploy --deployment="$DEPLOYMENT_ID" --tail=100
