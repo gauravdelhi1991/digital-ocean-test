@@ -1,0 +1,79 @@
+name: Deploy DigitalOcean Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "Run a read-only plan first; choose apply only after reviewing the plan and costs."
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+        default: plan
+
+permissions:
+  contents: read
+
+concurrency:
+  group: digitalocean-terraform
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    env:
+      TF_VAR_digitalocean_token: ${{ secrets.DIGITALOCEAN_TOKEN }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.DO_SPACES_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.DO_SPACES_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_EC2_METADATA_DISABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.11.4
+      - name: Check required credentials
+        run: |
+          test -n "$TF_VAR_digitalocean_token" || { echo "Missing DIGITALOCEAN_TOKEN secret"; exit 1; }
+          test -n "$AWS_ACCESS_KEY_ID" || { echo "Missing DO_SPACES_ACCESS_KEY_ID secret"; exit 1; }
+          test -n "$AWS_SECRET_ACCESS_KEY" || { echo "Missing DO_SPACES_SECRET_ACCESS_KEY secret"; exit 1; }
+      - name: Initialize remote state
+        run: terraform -chdir=terraform init -input=false -lockfile=readonly
+      - name: Validate configuration
+        run: terraform -chdir=terraform validate
+      - name: Create and summarize plan
+        run: |
+          terraform -chdir=terraform plan -input=false -no-color -out=tfplan
+          terraform -chdir=terraform show -no-color tfplan >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digitalocean-terraform-plan
+          path: terraform/tfplan
+          if-no-files-found: error
+          retention-days: 1
+
+  apply:
+    if: inputs.operation == 'apply'
+    needs: plan
+    runs-on: ubuntu-latest
+    environment: digitalocean-production
+    env:
+      TF_VAR_digitalocean_token: ${{ secrets.DIGITALOCEAN_TOKEN }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.DO_SPACES_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.DO_SPACES_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_EC2_METADATA_DISABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.11.4
+      - name: Initialize remote state
+        run: terraform -chdir=terraform init -input=false -lockfile=readonly
+      - uses: actions/download-artifact@v4
+        with:
+          name: digitalocean-terraform-plan
+          path: terraform
+      - name: Apply reviewed plan
+        run: terraform -chdir=terraform apply -input=false -auto-approve tfplan

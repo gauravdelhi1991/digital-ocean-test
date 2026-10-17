@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { buildApp } from "../../src/app";
 import { PostgresJobStore } from "../../src/jobs";
 import { runMigrations } from "../../src/migration-runner";
 
@@ -19,27 +20,50 @@ describe.skipIf(!databaseUrl)("PostgreSQL job persistence", () => {
   });
 
   it("durably stores the job payload and submission options", async () => {
-    const job = await store.createJob({
-      payload: { operation: "integration-test", marker: randomUUID() },
-      priority: 4,
-      maxRetries: 2,
-      timeoutMs: 5000,
-    });
+    const marker = randomUUID();
+    const app = buildApp(store, { logger: false });
 
-    const result = await pool.query(
-      `SELECT payload, priority, max_retries, timeout_ms, attempt_count, status
-       FROM jobs WHERE id = $1`,
-      [job.id],
-    );
+    try {
+      const address = await app.listen({ host: "127.0.0.1", port: 0 });
+      const response = await fetch(new URL("/jobs", address), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          payload: { operation: "integration-test", marker },
+          priority: 4,
+          maxRetries: 2,
+          timeoutMs: 5000,
+        }),
+      });
 
-    expect(result.rows[0]).toMatchObject({
-      payload: job.payload,
-      priority: 4,
-      max_retries: 2,
-      timeout_ms: 5000,
-      attempt_count: 0,
-      status: "accepted",
-    });
-    expect(job.id).toBeTruthy();
+      expect(response.status).toBe(201);
+      const job = await response.json();
+      expect(job).toMatchObject({
+        payload: { operation: "integration-test", marker },
+        priority: 4,
+        maxRetries: 2,
+        timeoutMs: 5000,
+        attemptCount: 0,
+        status: "accepted",
+      });
+
+      const result = await pool.query(
+        `SELECT payload, priority, max_retries, timeout_ms, attempt_count, status
+         FROM jobs WHERE id = $1`,
+        [job.id],
+      );
+
+      expect(result.rows[0]).toMatchObject({
+        payload: { operation: "integration-test", marker },
+        priority: 4,
+        max_retries: 2,
+        timeout_ms: 5000,
+        attempt_count: 0,
+        status: "accepted",
+      });
+    } finally {
+      await app.close();
+      await pool.query("DELETE FROM jobs WHERE payload->>'marker' = $1", [marker]);
+    }
   });
 });

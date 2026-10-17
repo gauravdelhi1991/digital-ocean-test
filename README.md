@@ -44,7 +44,7 @@ npm test
 npm run build
 ```
 
-Unit tests run without external services. To run the PostgreSQL integration test, set `TEST_DATABASE_URL` to a disposable test database and run:
+Unit tests run without external services. The integration test starts the Fastify API on an ephemeral localhost port, sends a real HTTP `POST /jobs` request, and verifies the response and persisted row against PostgreSQL. GitHub Actions starts a disposable PostgreSQL 16 service for the full test run. To run the integration test locally, set `TEST_DATABASE_URL` to a disposable test database and run:
 
 ```powershell
 npm run test:integration
@@ -54,27 +54,32 @@ Never point integration tests at production: the migration creates tables and th
 
 ## DigitalOcean deployment
 
-The App Platform specification at `.do/app.yaml` defines the API service and attaches it to the production managed PostgreSQL cluster named `digital-ocean-test-db`. Creating a managed cluster and running an App Platform service incur ongoing charges; check the current price shown in your DigitalOcean account and approve those costs before provisioning. Install `doctl`, authenticate with your DigitalOcean account, and create a PostgreSQL 16 cluster in `nyc3` using a supported single-node plan (for example, `db-s-1vcpu-1gb`):
+Infrastructure is code-managed in `terraform/`. The GitHub Actions workflows create a private DigitalOcean Spaces bucket for Terraform state, then Terraform provisions a managed PostgreSQL cluster, database, firewall rule, and App Platform API service. No DigitalOcean resources are created just by pushing code.
 
-```powershell
-doctl databases create digital-ocean-test-db --engine pg --version 16 --region nyc3 --size db-s-1vcpu-1gb --num-nodes 1
-```
+### Estimated monthly cost
 
-Use the returned cluster ID to create the database and user:
+The initial configuration uses a single-node PostgreSQL plan (`db-s-1vcpu-1gb`, currently listed at **$15/month**), one shared App Platform API instance (`apps-s-1vcpu-0.5gb`, currently **$5/month**), and the Spaces Standard Storage base subscription (**$5/month**, including 250 GiB storage and 1,024 GiB outbound transfer across buckets). That is approximately **$25/month** before taxes, additional storage/transfer, or other usage. If a Spaces subscription is already active on the account, the state bucket may use that existing subscription instead of adding another base charge. The single-node database is not highly available and is intended for an initial development deployment; check the current prices and plan details in the DigitalOcean account before applying.
 
-```powershell
-$clusterId = '<cluster-id-returned-above>'
-doctl databases db create $clusterId jobs
-doctl databases user create $clusterId jobs
-```
+- [Managed PostgreSQL pricing](https://docs.digitalocean.com/products/databases/postgresql/details/pricing/)
+- [App Platform pricing](https://docs.digitalocean.com/products/app-platform/details/pricing/)
+- [Spaces pricing](https://docs.digitalocean.com/products/spaces/details/pricing/)
 
-Connect the GitHub repository to DigitalOcean App Platform, then create the app from its tracked specification:
+### One-time GitHub and DigitalOcean setup
 
-```powershell
-doctl apps create --spec .do/app.yaml
-```
+1. Connect `gauravdelhi1991/digital-ocean-test` to DigitalOcean App Platform in the DigitalOcean control panel. This authorizes App Platform to build the private GitHub repository. Terraform creates a DigitalOcean project named `Digital Ocean Test` and assigns the API and database to it.
+2. Create a persistent DigitalOcean API token and a Spaces access key in the control panel. Add them as GitHub Actions repository secrets named `DIGITALOCEAN_TOKEN`, `DO_SPACES_ACCESS_KEY_ID`, and `DO_SPACES_SECRET_ACCESS_KEY`. Do not paste or commit credentials.
+3. In GitHub **Settings → Environments**, create `digitalocean-production` and configure a required reviewer. The apply job pauses there until a reviewer approves it.
 
-For an existing app, update the spec with `doctl apps update <app-id> --spec .do/app.yaml`. When the managed cluster is attached, verify that the app is listed as a trusted source. The managed database URL is supplied to the service as a secret environment variable; do not commit database credentials. The container runs the idempotent database migration before starting the API, with a PostgreSQL advisory lock to serialize simultaneous service starts. Verify `/health/ready` after deployment. The first deployment requires an authorized DigitalOcean account and GitHub repository integration; this specification does not create resources until explicitly applied.
+### Provision
+
+1. Run **Actions → Bootstrap Terraform State Storage → Run workflow**. It creates the private `digital-ocean-test-tfstate-821117` Spaces bucket in `nyc3` if it does not already exist. This starts the Spaces subscription if the account does not already have one.
+2. Run **Actions → Deploy DigitalOcean Infrastructure → Run workflow** with `operation: plan`. Review the generated plan and the cost estimate above.
+3. When ready, run the same workflow with `operation: apply`; approve the protected `digitalocean-production` environment. Terraform applies the reviewed plan to provision the database and API. The database cluster has `prevent_destroy` protection against accidental removal.
+4. After the app deployment completes, verify `https://<app-domain>/health/ready`.
+
+The API uses the managed cluster’s default database account for its first migration and runtime connection. Restrict database access to the App Platform app using the managed database firewall. Before handling sensitive production workloads, introduce a least-privilege application database role and a separate migration credential.
+
+The API container applies the idempotent migration before starting, using a PostgreSQL advisory lock so simultaneous service starts do not race. Terraform state is stored in a private Spaces bucket; deploy runs are serialized by GitHub Actions.
 
 ## Configuration
 

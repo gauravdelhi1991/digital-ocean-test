@@ -1,0 +1,38 @@
+name: Bootstrap Terraform State Storage
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: digitalocean-spaces-state-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  create-state-bucket:
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.DO_SPACES_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.DO_SPACES_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_EC2_METADATA_DISABLED: "true"
+      SPACES_BUCKET: digital-ocean-test-tfstate-821117
+      SPACES_ENDPOINT: https://nyc3.digitaloceanspaces.com
+    steps:
+      - name: Check required credentials
+        run: |
+          test -n "$AWS_ACCESS_KEY_ID" || { echo "Missing DO_SPACES_ACCESS_KEY_ID secret"; exit 1; }
+          test -n "$AWS_SECRET_ACCESS_KEY" || { echo "Missing DO_SPACES_SECRET_ACCESS_KEY secret"; exit 1; }
+      - name: Create private state bucket if absent
+        run: |
+          if aws s3api head-bucket --bucket "$SPACES_BUCKET" --endpoint-url "$SPACES_ENDPOINT"; then
+            echo "Terraform state bucket already exists and is accessible."
+          else
+            aws s3api create-bucket \
+              --bucket "$SPACES_BUCKET" \
+              --endpoint-url "$SPACES_ENDPOINT" \
+              --region "$AWS_DEFAULT_REGION"
+            echo "Created private Terraform state bucket in nyc3."
+          fi

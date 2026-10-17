@@ -6,7 +6,7 @@ Build a production-ready REST API for accepting jobs, executing them asynchronou
 
 ## Architecture
 
-Use TypeScript with Fastify for the HTTP API, PostgreSQL as the durable job registry and result store, Redis with BullMQ for asynchronous delivery, and separate worker and scheduler processes. Deploy the API and managed PostgreSQL on DigitalOcean first; add Redis and independently scalable workers in later increments. Keep the App Platform app specification in source control; provision the managed database cluster through DigitalOcean and attach it to the app. Use GitHub Actions for code validation and gated deployments.
+Use TypeScript with Fastify for the HTTP API, PostgreSQL as the durable job registry and result store, Redis with BullMQ for asynchronous delivery, and separate worker and scheduler processes. Deploy the API and managed PostgreSQL on DigitalOcean first; add Redis and independently scalable workers in later increments. Keep infrastructure in Terraform and use GitHub Actions for CI, remote-state bootstrap, and manually triggered, gated Terraform plans/applies. Store Terraform state in a private DigitalOcean Spaces bucket.
 
 ```text
 Client
@@ -67,9 +67,9 @@ The PostgreSQL `jobs` table stores payload, scheduling/execution options, status
 
 ## DigitalOcean and delivery pipeline
 
-- Run a stateless API service and managed PostgreSQL on DigitalOcean. Keep credentials out of source control and inject them using DigitalOcean secrets.
+- Run a stateless API service and managed PostgreSQL on DigitalOcean, grouped in a dedicated DigitalOcean Project. Keep credentials out of source control and inject them using DigitalOcean secrets.
 - Scale the API and worker pool independently. Add managed Redis before enabling asynchronous execution.
-- Track the DigitalOcean App Platform specification in source control. GitHub Actions validates, tests, and builds on pushes and pull requests. Production deployment is a separate, gated workflow requiring GitHub and DigitalOcean credentials.
+- Track DigitalOcean infrastructure in Terraform. GitHub Actions validates, tests, and builds on pushes and pull requests. A manually triggered workflow creates a Spaces state bucket and runs Terraform plan/apply; applying requires an explicitly protected GitHub environment and DigitalOcean/Spaces secrets.
 - Configure database backups, connection limits/pooling, health checks, migrations, and alerting before production traffic.
 
 ## High-load approach
@@ -78,8 +78,8 @@ Scale worker replicas independently according to backlog and utilization. Apply 
 
 ## Sequential implementation tasks
 
-1. **Build and deploy the database-backed submission service.** Implement the TypeScript API, validation, PostgreSQL schema/migrations, readiness/liveness checks, tests, container setup, DigitalOcean infrastructure configuration, and deployment documentation. Submit jobs as `accepted`; do not imply they are queued or processed yet.
-2. **Add code-managed CI and gated deployment.** Run lint, unit/integration tests, and builds in GitHub Actions. Add explicit protected deployment steps and secrets for DigitalOcean.
+1. **Build and provision the database-backed submission service.** Implement the TypeScript API, validation, PostgreSQL schema/migrations, readiness/liveness checks, tests, container setup, Terraform for DigitalOcean Managed PostgreSQL and App Platform, a Spaces remote-state bootstrap workflow, a gated Terraform deployment workflow, and deployment documentation. Submit jobs as `accepted`; do not imply they are queued or processed yet.
+2. **Expand CI and release safeguards.** Add broader PostgreSQL-backed integration coverage, branch protection, deployment verification, and release promotion practices to the existing GitHub Actions CI and gated infrastructure workflow.
 3. **Add status and result APIs.** Return complete lifecycle state, attempt count, errors, results, and timestamps with correct transitions and tests.
 4. **Add Redis, reliable publication, and transactional outbox.** Provision managed Redis; atomically persist jobs and outbox intents; retry publishing safely and test Redis outages/restarts.
 5. **Implement independently deployable workers.** Add pluggable typed handlers, job claiming, durable attempt state, acknowledgements, and crash/redelivery integration tests.
