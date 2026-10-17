@@ -1,4 +1,4 @@
-import { Pool } from "pg";
+import { createDatabasePool } from "./database";
 import { runMigrations } from "./migration-runner";
 
 async function main(): Promise<void> {
@@ -7,7 +7,7 @@ async function main(): Promise<void> {
     throw new Error("DATABASE_URL must be configured");
   }
 
-  const pool = new Pool({ connectionString });
+  const pool = createDatabasePool(connectionString);
   try {
     await runMigrations(pool);
   } finally {
