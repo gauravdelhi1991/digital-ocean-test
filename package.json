@@ -1,0 +1,30 @@
+{
+  "name": "digital-ocean-test",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A durable asynchronous job service, deployed on DigitalOcean.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "migrate": "tsx src/migrate.ts",
+    "migrate:prod": "node dist/migrate.js",
+    "test": "vitest run",
+    "test:integration": "vitest run tests/integration"
+  },
+  "dependencies": {
+    "fastify": "^5.4.0",
+    "pg": "^8.16.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "@types/pg": "^8.15.5",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3",
+    "vitest": "^5.0.5"
+  }
+}

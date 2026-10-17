@@ -1,0 +1,39 @@
+name: digital-ocean-test
+region: nyc
+services:
+  - name: api
+    github:
+      repo: gauravdelhi1991/digital-ocean-test
+      branch: main
+      deploy_on_push: true
+    source_dir: /
+    dockerfile_path: Dockerfile
+    http_port: 3000
+    instance_count: 1
+    instance_size_slug: basic-xxs
+    health_check:
+      http_path: /health/ready
+      initial_delay_seconds: 30
+      period_seconds: 10
+      timeout_seconds: 5
+      success_threshold: 1
+      failure_threshold: 3
+    envs:
+      - key: NODE_ENV
+        value: production
+        scope: RUN_TIME
+      - key: DATABASE_URL
+        value: ${jobs-db.DATABASE_URL}
+        type: SECRET
+        scope: RUN_TIME
+      - key: PORT
+        value: "3000"
+        scope: RUN_TIME
+databases:
+  - name: jobs-db
+    engine: PG
+    version: "16"
+    production: true
+    cluster_name: digital-ocean-test-db
+    db_name: jobs
+    db_user: jobs
