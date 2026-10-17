@@ -10,6 +10,7 @@ on:
         options:
           - plan
           - apply
+          - inspect
         default: plan
       deployment_branch:
         description: "GitHub branch App Platform should build and deploy."
@@ -28,6 +29,14 @@ on:
           - "no"
           - "yes"
         default: no
+      app_id:
+        description: "For inspect only: DigitalOcean App Platform app UUID."
+        required: false
+        type: string
+      deployment_id:
+        description: "For inspect only: App Platform deployment UUID."
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -171,3 +180,52 @@ jobs:
           }
       - name: Apply reviewed plan
         run: terraform -chdir=terraform apply -input=false -auto-approve tfplan
+
+  inspect:
+    if: github.ref == 'refs/heads/main' && inputs.operation == 'inspect'
+    runs-on: ubuntu-latest
+    env:
+      DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_TOKEN }}
+      APP_ID: ${{ inputs.app_id }}
+      DEPLOYMENT_ID: ${{ inputs.deployment_id }}
+    steps:
+      - name: Check inputs
+        run: |
+          test -n "$DIGITALOCEAN_TOKEN" || { echo "Missing DIGITALOCEAN_TOKEN secret"; exit 1; }
+          [[ "$APP_ID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || {
+            echo "app_id must be a DigitalOcean app UUID."
+            exit 1
+          }
+          [[ "$DEPLOYMENT_ID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || {
+            echo "deployment_id must be an App Platform deployment UUID."
+            exit 1
+          }
+      - name: Fetch deployment status
+        run: |
+          response="$(curl --fail-with-body --silent --show-error \
+            --header "Authorization: Bearer $DIGITALOCEAN_TOKEN" \
+            "https://api.digitalocean.com/v2/apps/$APP_ID/deployments/$DEPLOYMENT_ID")"
+          summary="$(jq -e --arg id "$DEPLOYMENT_ID" '
+            .deployment
+            | select(.id == $id)
+            | {
+                id,
+                phase,
+                cause,
+                progress: {
+                  pending_steps: .progress.pending_steps,
+                  running_steps: .progress.running_steps,
+                  success_steps: .progress.success_steps,
+                  error_steps: .progress.error_steps,
+                  steps: .progress.steps
+                }
+              }
+          ' <<< "$response")"
+          printf '%s\n' "$summary"
+          {
+            echo "## App Platform deployment"
+            echo
+            echo '```json'
+            printf '%s\n' "$summary"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

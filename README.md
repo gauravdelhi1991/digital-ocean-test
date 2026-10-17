@@ -77,6 +77,8 @@ The initial configuration uses a single-node PostgreSQL plan (`db-s-1vcpu-1gb`, 
 3. Only after reviewing, run the same workflow from the same `main` commit with `operation: apply`, enter the plan run ID, and set `confirm_plan: yes`. The workflow verifies that the earlier plan run succeeded on the same commit and applies that exact saved plan; it does not silently generate and apply a new plan. The database cluster has `prevent_destroy` protection against accidental removal.
 4. After the app deployment completes, verify `https://<app-domain>/health/ready`.
 
+If an App Platform deployment fails, dispatch the same workflow with `operation: inspect` and the app and deployment UUIDs from the failed run. This retrieves only that deployment’s status and progress details; it does not change infrastructure.
+
 The API uses the managed cluster’s default database account for its first migration and runtime connection. Restrict database access to the App Platform app using the managed database firewall. Before handling sensitive production workloads, introduce a least-privilege application database role and a separate migration credential.
 
 The API container applies the idempotent migration before starting, using a PostgreSQL advisory lock so simultaneous service starts do not race. Terraform state is stored in a private Spaces bucket; deploy runs are serialized by GitHub Actions.
