@@ -54,13 +54,27 @@ Never point integration tests at production: the migration creates tables and th
 
 ## DigitalOcean deployment
 
-The App Platform specification at `.do/app.yaml` defines the API service and attaches it to the production managed PostgreSQL cluster named `digital-ocean-test-db`. Create that cluster in the `nyc3` region first, add the App Platform application as a trusted source, and create the `jobs` database/user. Review current plan pricing before provisioning. Then connect the GitHub repository to DigitalOcean App Platform, install `doctl`, and authenticate with your DigitalOcean account. The container runs the idempotent database migration before starting the API, with a PostgreSQL advisory lock to serialize simultaneous service starts:
+The App Platform specification at `.do/app.yaml` defines the API service and attaches it to the production managed PostgreSQL cluster named `digital-ocean-test-db`. Creating a managed cluster and running an App Platform service incur ongoing charges; check the current price shown in your DigitalOcean account and approve those costs before provisioning. Install `doctl`, authenticate with your DigitalOcean account, and create a PostgreSQL 16 cluster in `nyc3` using a supported single-node plan (for example, `db-s-1vcpu-1gb`):
+
+```powershell
+doctl databases create digital-ocean-test-db --engine pg --version 16 --region nyc3 --size db-s-1vcpu-1gb --num-nodes 1
+```
+
+Use the returned cluster ID to create the database and user:
+
+```powershell
+$clusterId = '<cluster-id-returned-above>'
+doctl databases db create $clusterId jobs
+doctl databases user create $clusterId jobs
+```
+
+Connect the GitHub repository to DigitalOcean App Platform, then create the app from its tracked specification:
 
 ```powershell
 doctl apps create --spec .do/app.yaml
 ```
 
-For an existing app, update the spec with `doctl apps update <app-id> --spec .do/app.yaml`. The managed database URL is supplied to the service as a secret environment variable; do not commit database credentials. Verify `/health/ready` after deployment. The first deployment requires an authorized DigitalOcean account and GitHub repository integration; this specification does not create resources until explicitly applied.
+For an existing app, update the spec with `doctl apps update <app-id> --spec .do/app.yaml`. When the managed cluster is attached, verify that the app is listed as a trusted source. The managed database URL is supplied to the service as a secret environment variable; do not commit database credentials. The container runs the idempotent database migration before starting the API, with a PostgreSQL advisory lock to serialize simultaneous service starts. Verify `/health/ready` after deployment. The first deployment requires an authorized DigitalOcean account and GitHub repository integration; this specification does not create resources until explicitly applied.
 
 ## Configuration
 

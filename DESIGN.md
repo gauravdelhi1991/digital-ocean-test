@@ -6,7 +6,7 @@ Build a production-ready REST API for accepting jobs, executing them asynchronou
 
 ## Architecture
 
-Use TypeScript with Fastify for the HTTP API, PostgreSQL as the durable job registry and result store, Redis with BullMQ for asynchronous delivery, and separate worker and scheduler processes. Deploy the API and managed PostgreSQL on DigitalOcean first; add Redis and independently scalable workers in later increments. Use Terraform to manage DigitalOcean infrastructure and GitHub Actions for code validation and gated deployments.
+Use TypeScript with Fastify for the HTTP API, PostgreSQL as the durable job registry and result store, Redis with BullMQ for asynchronous delivery, and separate worker and scheduler processes. Deploy the API and managed PostgreSQL on DigitalOcean first; add Redis and independently scalable workers in later increments. Keep the App Platform app specification in source control; provision the managed database cluster through DigitalOcean and attach it to the app. Use GitHub Actions for code validation and gated deployments.
 
 ```text
 Client
@@ -69,7 +69,7 @@ The PostgreSQL `jobs` table stores payload, scheduling/execution options, status
 
 - Run a stateless API service and managed PostgreSQL on DigitalOcean. Keep credentials out of source control and inject them using DigitalOcean secrets.
 - Scale the API and worker pool independently. Add managed Redis before enabling asynchronous execution.
-- Track Terraform configuration for infrastructure. GitHub Actions validates, tests, and builds on pushes and pull requests. Production deployment is a separate, gated workflow requiring GitHub and DigitalOcean credentials.
+- Track the DigitalOcean App Platform specification in source control. GitHub Actions validates, tests, and builds on pushes and pull requests. Production deployment is a separate, gated workflow requiring GitHub and DigitalOcean credentials.
 - Configure database backups, connection limits/pooling, health checks, migrations, and alerting before production traffic.
 
 ## High-load approach
