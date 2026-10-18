@@ -58,8 +58,11 @@ describe.skipIf(!databaseUrl)("PostgreSQL job persistence", () => {
       expect(await statusResponse.json()).toEqual(job);
 
       const result = await pool.query(
-        `SELECT payload, priority, max_retries, timeout_ms, attempt_count, status
-         FROM jobs WHERE id = $1`,
+        `SELECT jobs.payload, jobs.priority, jobs.max_retries, jobs.timeout_ms,
+                jobs.attempt_count, jobs.status, outbox.job_id AS outbox_job_id
+         FROM jobs
+         JOIN job_outbox AS outbox ON outbox.job_id = jobs.id
+         WHERE jobs.id = $1`,
         [job.id],
       );
 
@@ -70,6 +73,7 @@ describe.skipIf(!databaseUrl)("PostgreSQL job persistence", () => {
         timeout_ms: 5000,
         attempt_count: 0,
         status: "accepted",
+        outbox_job_id: job.id,
       });
     } finally {
       await app.close();

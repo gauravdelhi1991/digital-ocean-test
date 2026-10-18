@@ -39,6 +39,17 @@ export interface JobStore {
   checkConnection(): Promise<void>;
 }
 
+export interface ClaimedOutboxMessage {
+  jobId: string;
+  attempt: number;
+}
+
+export interface OutboxStore {
+  claimNextOutboxMessage(jobId?: string): Promise<ClaimedOutboxMessage | null>;
+  markOutboxMessagePublished(jobId: string): Promise<void>;
+  scheduleOutboxRetry(jobId: string, delayMs: number, error: string): Promise<void>;
+}
+
 interface JobRow {
   id: string;
   payload: Record<string, unknown>;
@@ -78,22 +89,33 @@ function mapJob(row: JobRow): Job {
   };
 }
 
-export class PostgresJobStore implements JobStore {
+export class PostgresJobStore implements JobStore, OutboxStore {
   constructor(private readonly pool: Pool) {}
 
   async createJob(input: NewJob): Promise<Job> {
-    const result = await this.pool.query<JobRow>(
-      `INSERT INTO jobs (id, payload, priority, max_retries, timeout_ms)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING ${jobColumns}`,
-      [randomUUID(), input.payload, input.priority, input.maxRetries, input.timeoutMs],
-    );
-    const row = result.rows[0];
-    if (!row) {
-      throw new Error("PostgreSQL did not return the inserted job");
-    }
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query<JobRow>(
+        `INSERT INTO jobs (id, payload, priority, max_retries, timeout_ms)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING ${jobColumns}`,
+        [randomUUID(), input.payload, input.priority, input.maxRetries, input.timeoutMs],
+      );
+      const row = result.rows[0];
+      if (!row) {
+        throw new Error("PostgreSQL did not return the inserted job");
+      }
 
-    return mapJob(row);
+      await client.query("INSERT INTO job_outbox (job_id) VALUES ($1)", [row.id]);
+      await client.query("COMMIT");
+      return mapJob(row);
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async getJob(id: string): Promise<Job | null> {
@@ -107,5 +129,71 @@ export class PostgresJobStore implements JobStore {
 
   async checkConnection(): Promise<void> {
     await this.pool.query("SELECT 1");
+  }
+
+  async claimNextOutboxMessage(jobId?: string): Promise<ClaimedOutboxMessage | null> {
+    const result = await this.pool.query<{ job_id: string; attempts: number }>(`
+      WITH next_message AS (
+        SELECT job_id
+        FROM job_outbox
+        WHERE published_at IS NULL
+          AND ($1::uuid IS NULL OR job_id = $1)
+          AND available_at <= NOW()
+          AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '60 seconds')
+        ORDER BY available_at, created_at
+        FOR UPDATE SKIP LOCKED
+        LIMIT 1
+      )
+      UPDATE job_outbox AS outbox
+      SET claimed_at = NOW(), attempts = attempts + 1
+      FROM next_message
+      WHERE outbox.job_id = next_message.job_id
+      RETURNING outbox.job_id, outbox.attempts
+    `, [jobId ?? null]);
+    const row = result.rows[0];
+    return row ? { jobId: row.job_id, attempt: row.attempts } : null;
+  }
+
+  async markOutboxMessagePublished(jobId: string): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query(
+        `UPDATE job_outbox
+         SET published_at = NOW(), claimed_at = NULL, last_error = NULL
+         WHERE job_id = $1 AND published_at IS NULL`,
+        [jobId],
+      );
+      if (result.rowCount !== 1) {
+        throw new Error(`Outbox message for job ${jobId} is not pending publication`);
+      }
+      await client.query(
+        `UPDATE jobs
+         SET status = 'queued', updated_at = NOW()
+         WHERE id = $1 AND status = 'accepted'`,
+        [jobId],
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async scheduleOutboxRetry(
+    jobId: string,
+    delayMs: number,
+    error: string,
+  ): Promise<void> {
+    await this.pool.query(
+      `UPDATE job_outbox
+       SET claimed_at = NULL,
+           available_at = NOW() + ($2 * INTERVAL '1 millisecond'),
+           last_error = $3
+       WHERE job_id = $1 AND published_at IS NULL`,
+      [jobId, delayMs, error.slice(0, 4000)],
+    );
   }
 }
