@@ -13,21 +13,22 @@ export async function runMigrations(pool: Pool): Promise<void> {
         applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
-    const migration = "001_create_jobs";
-    const applied = await client.query(
-      "SELECT 1 FROM schema_migrations WHERE version = $1",
-      [migration],
-    );
-
-    if (applied.rowCount === 0) {
-      const sql = await readFile(
-        resolve(__dirname, "../migrations/001_create_jobs.sql"),
-        "utf8",
+    for (const migration of ["001_create_jobs", "002_create_job_outbox"]) {
+      const applied = await client.query(
+        "SELECT 1 FROM schema_migrations WHERE version = $1",
+        [migration],
       );
-      await client.query(sql);
-      await client.query("INSERT INTO schema_migrations (version) VALUES ($1)", [
-        migration,
-      ]);
+
+      if (applied.rowCount === 0) {
+        const sql = await readFile(
+          resolve(__dirname, `../migrations/${migration}.sql`),
+          "utf8",
+        );
+        await client.query(sql);
+        await client.query("INSERT INTO schema_migrations (version) VALUES ($1)", [
+          migration,
+        ]);
+      }
     }
 
     await client.query("COMMIT");
