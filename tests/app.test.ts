@@ -8,12 +8,19 @@ function createStore(overrides: Partial<JobStore> = {}) {
     ...input,
     attemptCount: 0,
     status: "accepted" as const,
+    lastError: null,
+    result: null,
     createdAt: "2026-10-17T00:00:00.000Z",
+    updatedAt: "2026-10-17T00:00:00.000Z",
+    startedAt: null,
+    completedAt: null,
   }));
+  const getJob = vi.fn(async () => null);
   const checkConnection = vi.fn(async () => {});
   return {
-    store: { createJob, checkConnection, ...overrides } as JobStore,
+    store: { createJob, getJob, checkConnection, ...overrides } as JobStore,
     createJob,
+    getJob,
     checkConnection,
   };
 }
@@ -70,6 +77,82 @@ describe("job submission API", () => {
       maxRetries: 5,
       timeoutMs: 60_000,
     });
+    await app.close();
+  });
+
+  it("returns the current job status and lifecycle details", async () => {
+    const job = {
+      id: "d2719a42-75b1-4339-b4f5-c640f86aed7f",
+      payload: { operation: "import" },
+      priority: 0,
+      maxRetries: 3,
+      timeoutMs: 30_000,
+      attemptCount: 2,
+      status: "failed" as const,
+      lastError: "upstream unavailable",
+      result: null,
+      createdAt: "2026-10-17T00:00:00.000Z",
+      updatedAt: "2026-10-17T00:02:00.000Z",
+      startedAt: "2026-10-17T00:01:00.000Z",
+      completedAt: "2026-10-17T00:02:00.000Z",
+    };
+    const getJob = vi.fn(async () => job);
+    const { store } = createStore({ getJob });
+    const app = buildApp(store, { logger: false });
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/jobs/${job.id}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual(job);
+    expect(getJob).toHaveBeenCalledWith(job.id);
+    await app.close();
+  });
+
+  it("rejects malformed job IDs", async () => {
+    const { store, getJob } = createStore();
+    const app = buildApp(store, { logger: false });
+
+    const response = await app.inject({ method: "GET", url: "/jobs/not-a-uuid" });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ error: "Invalid job ID" });
+    expect(getJob).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("returns not found for an unknown job ID", async () => {
+    const { store, getJob } = createStore();
+    const app = buildApp(store, { logger: false });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/jobs/d2719a42-75b1-4339-b4f5-c640f86aed7f",
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toEqual({ error: "Job not found" });
+    expect(getJob).toHaveBeenCalledWith("d2719a42-75b1-4339-b4f5-c640f86aed7f");
+    await app.close();
+  });
+
+  it("returns an error when status retrieval fails", async () => {
+    const { store } = createStore({
+      getJob: vi.fn(async () => {
+        throw new Error("database unavailable");
+      }),
+    });
+    const app = buildApp(store, { logger: false });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/jobs/d2719a42-75b1-4339-b4f5-c640f86aed7f",
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).toEqual({ error: "Job status could not be retrieved" });
     await app.close();
   });
 

@@ -1,6 +1,6 @@
 # Digital Ocean Test
 
-A TypeScript REST API, deployed as an App Platform service, that durably accepts job submissions in PostgreSQL. This first milestone stores jobs as `accepted`; it does not enqueue or execute them yet. Later, a separate App Platform worker will consume Redis jobs and execute the handlers itself. DigitalOcean Functions are not used. Redis, workers, retries, scheduling, and status/result lookup are later milestones described in [DESIGN.md](./DESIGN.md).
+A TypeScript REST API, deployed as an App Platform service, that durably accepts job submissions in PostgreSQL. This milestone stores jobs as `accepted` and provides job status lookup; it does not enqueue or execute jobs yet. Later, a separate App Platform worker will consume Redis jobs and execute the handlers itself. DigitalOcean Functions are not used. Redis, workers, retries, and scheduling are later milestones described in [DESIGN.md](./DESIGN.md).
 
 ## Requirements
 
@@ -35,6 +35,14 @@ Invoke-RestMethod -Method Post -Uri http://localhost:3000/jobs `
 ```
 
 `payload` must be a JSON object. `priority` defaults to `0` and must be between `-100` and `100`; `maxRetries` defaults to `3` and must be between `0` and `20`; `timeoutMs` defaults to `30000` and must be between `100` and `3600000`. A successful request returns HTTP `201` and a generated job ID with status `accepted`, only after the database insert succeeds. This milestone intentionally does not claim queue delivery or execution.
+
+## Check job status
+
+```powershell
+Invoke-RestMethod -Method Get -Uri http://localhost:3000/jobs/<job-id>
+```
+
+The endpoint returns the job payload, current status, attempt count, last error, result, and lifecycle timestamps. It returns HTTP `404` if no job exists with that UUID and HTTP `400` if the ID is malformed. Newly submitted jobs remain `accepted` until queue publishing and worker execution are implemented.
 
 ## Migrations, tests, and build
 
