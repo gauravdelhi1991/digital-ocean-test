@@ -39,19 +39,6 @@ resource "digitalocean_database_cluster" "jobs" {
   }
 }
 
-resource "digitalocean_database_cluster" "queue" {
-  name       = var.queue_cluster_name
-  engine     = "valkey"
-  version    = "8"
-  size       = var.queue_size
-  region     = var.database_region
-  node_count = 1
-
-  lifecycle {
-    prevent_destroy = true
-  }
-}
-
 resource "digitalocean_project" "jobs" {
   name        = var.project_name
   description = "Resources for the asynchronous job service."
@@ -59,7 +46,6 @@ resource "digitalocean_project" "jobs" {
   environment = "Development"
   resources = [
     digitalocean_database_cluster.jobs.urn,
-    digitalocean_database_cluster.queue.urn,
     "do:app:${digitalocean_app.jobs.id}",
   ]
 }
@@ -71,15 +57,6 @@ resource "digitalocean_database_db" "jobs" {
 
 resource "digitalocean_database_firewall" "jobs" {
   cluster_id = digitalocean_database_cluster.jobs.id
-
-  rule {
-    type  = "app"
-    value = digitalocean_app.jobs.id
-  }
-}
-
-resource "digitalocean_database_firewall" "queue" {
-  cluster_id = digitalocean_database_cluster.queue.id
 
   rule {
     type  = "app"
@@ -123,13 +100,6 @@ resource "digitalocean_app" "jobs" {
       }
 
       env {
-        key   = "REDIS_URL"
-        value = digitalocean_database_cluster.queue.uri
-        type  = "SECRET"
-        scope = "RUN_TIME"
-      }
-
-      env {
         key   = "NODE_ENV"
         value = "production"
         type  = "GENERAL"
@@ -146,7 +116,5 @@ resource "digitalocean_app" "jobs" {
       db_name      = digitalocean_database_db.jobs.name
       db_user      = digitalocean_database_cluster.jobs.user
     }
-
-    # Valkey is connected through the REDIS_URL secret above, not an App Platform database binding.
   }
 }
