@@ -92,7 +92,7 @@ If an App Platform deployment fails, dispatch the workflow from `main` with `ope
 
 The API uses the managed PostgreSQL cluster’s default database account for its first migration and runtime connection. Terraform restricts both managed databases to the App Platform app using database firewall rules. Before handling sensitive production workloads, introduce a least-privilege application database role and a separate migration credential.
 
-The API and worker containers apply the idempotent migrations before starting, using a PostgreSQL advisory lock so simultaneous component starts do not race. Terraform state is stored in a private Spaces bucket; deploy runs are serialized by GitHub Actions.
+The API container and worker entry point apply the idempotent migrations before starting, using a PostgreSQL advisory lock so simultaneous component starts do not race. Terraform state is stored in a private Spaces bucket; deploy runs are serialized by GitHub Actions.
 
 ## Configuration
 

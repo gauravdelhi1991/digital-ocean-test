@@ -1,6 +1,7 @@
 import { createDatabasePool } from "./database";
 import { createJobWorker } from "./job-worker";
 import { PostgresJobStore } from "./jobs";
+import { runMigrations } from "./migration-runner";
 
 async function main(): Promise<void> {
   const connectionString = process.env.DATABASE_URL;
@@ -18,6 +19,13 @@ async function main(): Promise<void> {
   }
 
   const pool = createDatabasePool(connectionString);
+  try {
+    await runMigrations(pool);
+  } catch (error) {
+    await pool.end();
+    throw error;
+  }
+
   const worker = createJobWorker(
     redisConnectionString,
     new PostgresJobStore(pool),

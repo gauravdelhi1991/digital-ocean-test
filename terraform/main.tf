@@ -152,7 +152,7 @@ resource "digitalocean_app" "jobs" {
       instance_size_slug = var.worker_instance_size
       source_dir         = "/"
       dockerfile_path    = "Dockerfile"
-      run_command        = "npm run migrate:prod && exec node dist/worker.js"
+      run_command        = "node dist/worker.js"
 
       autoscaling {
         min_instance_count = 1
