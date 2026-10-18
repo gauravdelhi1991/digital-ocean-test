@@ -94,11 +94,21 @@ resource "digitalocean_app" "jobs" {
 
     service {
       name               = "api"
-      instance_count     = 1
-      instance_size_slug = var.app_instance_size
+      instance_size_slug = var.api_instance_size
       source_dir         = "/"
       dockerfile_path    = "Dockerfile"
       http_port          = 3000
+
+      autoscaling {
+        min_instance_count = 1
+        max_instance_count = var.app_max_instance_count
+
+        metrics {
+          cpu {
+            percent = 70
+          }
+        }
+      }
 
       github {
         repo           = var.github_repo
@@ -132,6 +142,52 @@ resource "digitalocean_app" "jobs" {
       env {
         key   = "NODE_ENV"
         value = "production"
+        type  = "GENERAL"
+        scope = "RUN_TIME"
+      }
+    }
+
+    worker {
+      name               = "job-worker"
+      instance_size_slug = var.worker_instance_size
+      source_dir         = "/"
+      dockerfile_path    = "Dockerfile"
+      run_command        = "npm run migrate:prod && exec node dist/worker.js"
+
+      autoscaling {
+        min_instance_count = 1
+        max_instance_count = var.app_max_instance_count
+
+        metrics {
+          cpu {
+            percent = 70
+          }
+        }
+      }
+
+      github {
+        repo           = var.github_repo
+        branch         = var.github_branch
+        deploy_on_push = true
+      }
+
+      env {
+        key   = "DATABASE_URL"
+        value = "$${jobs-db.DATABASE_URL}"
+        type  = "SECRET"
+        scope = "RUN_TIME"
+      }
+
+      env {
+        key   = "REDIS_URL"
+        value = digitalocean_database_cluster.queue.uri
+        type  = "SECRET"
+        scope = "RUN_TIME"
+      }
+
+      env {
+        key   = "WORKER_CONCURRENCY"
+        value = "5"
         type  = "GENERAL"
         scope = "RUN_TIME"
       }

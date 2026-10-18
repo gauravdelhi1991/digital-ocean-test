@@ -7,6 +7,11 @@ interface JobQueueData {
   jobId: string;
 }
 
+export interface JobQueueOptions {
+  maxRetries: number;
+  priority: number;
+}
+
 export function parseRedisConnectionOptions(connectionString: string): RedisOptions {
   const url = new URL(connectionString);
   if (url.protocol !== "redis:" && url.protocol !== "rediss:") {
@@ -47,8 +52,17 @@ export function createJobQueuePublisher(
   });
 
   return {
-    async publish(jobId) {
-      await queue.add("execute", { jobId }, { jobId });
+    async publish(jobId, options: JobQueueOptions) {
+      await queue.add(
+        "execute",
+        { jobId },
+        {
+          jobId,
+          attempts: options.maxRetries + 1,
+          backoff: { type: "custom", delay: 1000 },
+          priority: 101 - options.priority,
+        },
+      );
     },
     close: () => queue.close(),
     onError(handler) {

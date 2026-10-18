@@ -1,7 +1,10 @@
 import type { OutboxStore } from "./jobs";
 
 export interface JobQueuePublisher {
-  publish(jobId: string): Promise<void>;
+  publish(
+    jobId: string,
+    options: { maxRetries: number; priority: number },
+  ): Promise<void>;
   close(): Promise<void>;
   onError(handler: (error: Error) => void): void;
 }
@@ -58,7 +61,10 @@ export class OutboxPublisher {
     }
 
     try {
-      await this.queue.publish(message.jobId);
+      await this.queue.publish(message.jobId, {
+        maxRetries: message.maxRetries,
+        priority: message.priority,
+      });
       await this.store.markOutboxMessagePublished(message.jobId);
     } catch (error) {
       const errorMessage =

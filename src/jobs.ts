@@ -42,12 +42,21 @@ export interface JobStore {
 export interface ClaimedOutboxMessage {
   jobId: string;
   attempt: number;
+  maxRetries: number;
+  priority: number;
 }
 
 export interface OutboxStore {
   claimNextOutboxMessage(jobId?: string): Promise<ClaimedOutboxMessage | null>;
   markOutboxMessagePublished(jobId: string): Promise<void>;
   scheduleOutboxRetry(jobId: string, delayMs: number, error: string): Promise<void>;
+}
+
+export interface WorkerJobStore {
+  startJobAttempt(jobId: string): Promise<Job | null>;
+  markJobRetryable(jobId: string, error: string): Promise<void>;
+  markJobSucceeded(jobId: string, result: unknown): Promise<void>;
+  markJobDeadLettered(jobId: string, error: string): Promise<void>;
 }
 
 interface JobRow {
@@ -89,7 +98,7 @@ function mapJob(row: JobRow): Job {
   };
 }
 
-export class PostgresJobStore implements JobStore, OutboxStore {
+export class PostgresJobStore implements JobStore, OutboxStore, WorkerJobStore {
   constructor(private readonly pool: Pool) {}
 
   async createJob(input: NewJob): Promise<Job> {
@@ -132,26 +141,40 @@ export class PostgresJobStore implements JobStore, OutboxStore {
   }
 
   async claimNextOutboxMessage(jobId?: string): Promise<ClaimedOutboxMessage | null> {
-    const result = await this.pool.query<{ job_id: string; attempts: number }>(`
+    const result = await this.pool.query<{
+      job_id: string;
+      attempts: number;
+      max_retries: number;
+      priority: number;
+    }>(`
       WITH next_message AS (
-        SELECT job_id
-        FROM job_outbox
-        WHERE published_at IS NULL
-          AND ($1::uuid IS NULL OR job_id = $1)
-          AND available_at <= NOW()
-          AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '60 seconds')
-        ORDER BY available_at, created_at
-        FOR UPDATE SKIP LOCKED
+        SELECT outbox.job_id
+        FROM job_outbox AS outbox
+        JOIN jobs ON jobs.id = outbox.job_id
+        WHERE outbox.published_at IS NULL
+          AND ($1::uuid IS NULL OR outbox.job_id = $1)
+          AND outbox.available_at <= NOW()
+          AND (outbox.claimed_at IS NULL OR outbox.claimed_at < NOW() - INTERVAL '60 seconds')
+        ORDER BY outbox.available_at, outbox.created_at
+        FOR UPDATE OF outbox SKIP LOCKED
         LIMIT 1
       )
       UPDATE job_outbox AS outbox
       SET claimed_at = NOW(), attempts = attempts + 1
       FROM next_message
+      JOIN jobs ON jobs.id = next_message.job_id
       WHERE outbox.job_id = next_message.job_id
-      RETURNING outbox.job_id, outbox.attempts
+      RETURNING outbox.job_id, outbox.attempts, jobs.max_retries, jobs.priority
     `, [jobId ?? null]);
     const row = result.rows[0];
-    return row ? { jobId: row.job_id, attempt: row.attempts } : null;
+    return row
+      ? {
+          jobId: row.job_id,
+          attempt: row.attempts,
+          maxRetries: row.max_retries,
+          priority: row.priority,
+        }
+      : null;
   }
 
   async markOutboxMessagePublished(jobId: string): Promise<void> {
@@ -195,5 +218,93 @@ export class PostgresJobStore implements JobStore, OutboxStore {
        WHERE job_id = $1 AND published_at IS NULL`,
       [jobId, delayMs, error.slice(0, 4000)],
     );
+  }
+
+  async startJobAttempt(jobId: string): Promise<Job | null> {
+    const result = await this.pool.query<JobRow>(
+      `UPDATE jobs
+       SET status = 'running', attempt_count = attempt_count + 1,
+           started_at = COALESCE(started_at, NOW()), updated_at = NOW()
+       WHERE id = $1 AND status IN ('accepted', 'queued', 'running')
+       RETURNING ${jobColumns}`,
+      [jobId],
+    );
+    const row = result.rows[0];
+    if (row) {
+      return mapJob(row);
+    }
+
+    const existing = await this.pool.query<{ id: string }>(
+      "SELECT id FROM jobs WHERE id = $1",
+      [jobId],
+    );
+    if (!existing.rows[0]) {
+      throw new Error(`Queue references unknown job ${jobId}`);
+    }
+    return null;
+  }
+
+  async markJobRetryable(jobId: string, error: string): Promise<void> {
+    const result = await this.pool.query(
+      `UPDATE jobs
+       SET status = 'queued', last_error = $2, updated_at = NOW()
+       WHERE id = $1 AND status = 'running'`,
+      [jobId, error.slice(0, 4000)],
+    );
+    if (result.rowCount !== 1) {
+      throw new Error(`Running job ${jobId} could not be scheduled for retry`);
+    }
+  }
+
+  async markJobSucceeded(jobId: string, result: unknown): Promise<void> {
+    const update = await this.pool.query(
+      `UPDATE jobs
+       SET status = 'succeeded', result = $2, last_error = NULL,
+           completed_at = NOW(), updated_at = NOW()
+       WHERE id = $1 AND status = 'running'`,
+      [jobId, result],
+    );
+    if (update.rowCount !== 1) {
+      throw new Error(`Running job ${jobId} could not be marked succeeded`);
+    }
+  }
+
+  async markJobDeadLettered(jobId: string, error: string): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query<{
+        payload: Record<string, unknown>;
+        attempt_count: number;
+      }>(
+        `UPDATE jobs
+         SET status = 'dead-lettered', last_error = $2,
+             completed_at = NOW(), updated_at = NOW()
+         WHERE id = $1 AND status = 'running'
+         RETURNING payload, attempt_count`,
+        [jobId, error.slice(0, 4000)],
+      );
+      const row = result.rows[0];
+      if (!row) {
+        throw new Error(`Running job ${jobId} could not be dead-lettered`);
+      }
+
+      await client.query(
+        `INSERT INTO job_dead_letters (job_id, payload, attempt_count, error)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (job_id) DO UPDATE
+         SET payload = EXCLUDED.payload,
+             attempt_count = EXCLUDED.attempt_count,
+             error = EXCLUDED.error,
+             failed_at = NOW()`,
+        [jobId, row.payload, row.attempt_count, error.slice(0, 4000)],
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }

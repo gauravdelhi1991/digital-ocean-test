@@ -1,6 +1,9 @@
 import { Pool } from "pg";
 
-export function createDatabasePool(connectionString: string): Pool {
+export function createDatabasePool(
+  connectionString: string,
+  maxConnections = 3,
+): Pool {
   const url = new URL(connectionString);
   if (
     url.searchParams.get("sslmode")?.toLowerCase() === "require" &&
@@ -10,5 +13,5 @@ export function createDatabasePool(connectionString: string): Pool {
     url.searchParams.set("uselibpqcompat", "true");
   }
 
-  return new Pool({ connectionString: url.toString() });
+  return new Pool({ connectionString: url.toString(), max: maxConnections });
 }

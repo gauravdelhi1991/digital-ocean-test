@@ -13,7 +13,11 @@ export async function runMigrations(pool: Pool): Promise<void> {
         applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
-    for (const migration of ["001_create_jobs", "002_create_job_outbox"]) {
+    for (const migration of [
+      "001_create_jobs",
+      "002_create_job_outbox",
+      "003_create_job_dead_letters",
+    ]) {
       const applied = await client.query(
         "SELECT 1 FROM schema_migrations WHERE version = $1",
         [migration],

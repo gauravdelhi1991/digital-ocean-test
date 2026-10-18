@@ -12,7 +12,9 @@ function createStore(message: ClaimedOutboxMessage | null) {
   return store;
 }
 
-function createQueue(publish: (jobId: string) => Promise<void>): JobQueuePublisher {
+function createQueue(
+  publish: JobQueuePublisher["publish"],
+): JobQueuePublisher {
   return {
     publish,
     close: vi.fn(async () => {}),
@@ -22,7 +24,12 @@ function createQueue(publish: (jobId: string) => Promise<void>): JobQueuePublish
 
 describe("outbox publisher", () => {
   it("publishes and marks a claimed message", async () => {
-    const message = { jobId: "job-1", attempt: 1 };
+    const message = {
+      jobId: "job-1",
+      attempt: 1,
+      maxRetries: 3,
+      priority: 10,
+    };
     const store = createStore(message);
     const publish = vi.fn(async () => {});
     const logger = { error: vi.fn(), warn: vi.fn() };
@@ -30,13 +37,21 @@ describe("outbox publisher", () => {
 
     await expect(publisher.publishNext()).resolves.toBe(true);
 
-    expect(publish).toHaveBeenCalledWith("job-1");
+    expect(publish).toHaveBeenCalledWith("job-1", {
+      maxRetries: 3,
+      priority: 10,
+    });
     expect(store.markOutboxMessagePublished).toHaveBeenCalledWith("job-1");
     expect(store.scheduleOutboxRetry).not.toHaveBeenCalled();
   });
 
   it("schedules a retry and preserves the accepted job when publishing fails", async () => {
-    const message = { jobId: "job-2", attempt: 2 };
+    const message = {
+      jobId: "job-2",
+      attempt: 2,
+      maxRetries: 3,
+      priority: 0,
+    };
     const store = createStore(message);
     const logger = { error: vi.fn(), warn: vi.fn() };
     const publisher = new OutboxPublisher(

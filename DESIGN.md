@@ -6,7 +6,7 @@ Build a production-ready REST API for accepting jobs, executing them asynchronou
 
 ## Architecture
 
-Use TypeScript with Fastify for the HTTP API, PostgreSQL as the durable job registry and result store, Valkey (Redis-compatible) with BullMQ for asynchronous delivery, and separate worker and scheduler processes. Host the HTTP API as an App Platform service backed by PostgreSQL. A publisher currently runs with the API; add a distinct App Platform worker component later to consume queue messages and execute handlers itself. Keep infrastructure in Terraform and use GitHub Actions for CI, remote-state bootstrap, and manually triggered Terraform plans/applies. Store Terraform state in a private DigitalOcean Spaces bucket. DigitalOcean Functions are not part of this design.
+Use TypeScript with Fastify for the HTTP API, PostgreSQL as the durable job registry, result store, and dead-letter audit, Valkey (Redis-compatible) with BullMQ for asynchronous delivery, and separate worker and scheduler processes. Host the API as an App Platform service and execute queued work in a separate App Platform worker component. Keep infrastructure in Terraform and use GitHub Actions for CI, remote-state bootstrap, and manually triggered Terraform plans/applies. Store Terraform state in a private DigitalOcean Spaces bucket. DigitalOcean Functions are not part of this design.
 
 ```text
 Client
@@ -40,7 +40,7 @@ Scheduler (later) ---> PostgreSQL schedules ---> Redis delayed/recurring jobs
 - The API's outbox publisher claims records with expiring leases, retries failures with capped exponential backoff and jitter, and marks a job `queued` only after BullMQ/Redis accepts it. Stable job IDs make ambiguous publish retries deduplicate while the queue record exists.
 - Workers consume BullMQ jobs and persist attempt and completion state. Queue delivery and execution are at least once, not exactly once: a crash between performing a side effect and recording completion can cause a redelivery.
 - Bound duplicate work using stable job IDs, conditional state transitions, and handler-level idempotency keys. Handlers that perform external side effects must make those effects idempotent where possible.
-- Retry transient errors with capped exponential backoff and jitter. Persist the final error and dead-letter state when retries are exhausted; do not silently discard failed work.
+- Retry execution failures with capped exponential backoff and jitter. Persist the final error and dead-letter state transactionally when retries are exhausted; do not silently discard failed work.
 
 ## API and data
 
@@ -50,12 +50,14 @@ Initial API:
 - `GET /jobs/{id}`: return the stored job, including its current state, attempt count, last error, result, and lifecycle timestamps; return `404` for an unknown UUID.
 - `GET /health/live` and `GET /health/ready`: process liveness and database readiness.
 
+The initial worker dispatches on `payload.type` and supports only `example`, which returns the submitted payload. Unsupported types fail, follow the configured retry policy, and enter the PostgreSQL dead-letter table when retries are exhausted.
+
 Later API:
 
 - `GET /jobs/queue-depth`: queued, running, delayed, and dead-letter counts plus backlog lag.
 - Cancellation and drain/resume operations for pending work and graceful worker shutdown.
 
-The PostgreSQL `jobs` table stores payload, scheduling/execution options, status, attempt count, last error, result, and timestamps. Jobs remain `accepted` until publication succeeds, then remain `queued` until a worker processes them. The schedules and dead-letter audit store are added in their corresponding milestones.
+The PostgreSQL `jobs` table stores payload, scheduling/execution options, status, attempt count, last error, result, and timestamps. Jobs remain `accepted` until publication succeeds, then remain `queued` until a worker processes them. Exhausted failures are stored transactionally in `job_dead_letters`; schedule tables are added in the scheduling milestone.
 
 ## Retry, timeout, scheduling, and operations
 
@@ -67,8 +69,8 @@ The PostgreSQL `jobs` table stores payload, scheduling/execution options, status
 
 ## DigitalOcean and delivery pipeline
 
-- Run a stateless API service and managed PostgreSQL on DigitalOcean, grouped in a dedicated DigitalOcean Project. Keep credentials out of source control and inject them using DigitalOcean secrets.
-- Scale the API and worker pool independently. The API publisher connects to managed Valkey through a secret URI; the later App Platform worker will consume the queue and execute handlers itself, without invoking a Function per job.
+- Run a stateless API service and separate worker, with managed PostgreSQL and Valkey, on DigitalOcean, grouped in a dedicated DigitalOcean Project. Keep credentials out of source control and inject them using DigitalOcean secrets.
+- Scale API and worker independently using App Platform dedicated-CPU autoscaling with a 70% CPU target and a one-to-three instance range. App Platform currently uses the same target for scaling up and down and does not expose separate 40%/five-minute scale-down settings.
 - Track DigitalOcean infrastructure in Terraform. GitHub Actions validates, tests, and builds on pushes and pull requests. A manually triggered workflow creates a Spaces state bucket and runs Terraform plan/apply; applying requires an explicitly protected GitHub environment and DigitalOcean/Spaces secrets. Managed PostgreSQL and Valkey are firewall-restricted to the App Platform API.
 - Configure database backups, connection limits/pooling, health checks, migrations, and alerting before production traffic.
 
@@ -82,8 +84,8 @@ Scale worker replicas independently according to backlog and utilization. Apply 
 2. **Expand CI and release safeguards.** Add broader PostgreSQL-backed integration coverage, branch protection, deployment verification, and release promotion practices to the existing GitHub Actions CI and gated infrastructure workflow.
 3. **Add status and result APIs.** Return complete lifecycle state, attempt count, errors, results, and timestamps with correct transitions and tests.
 4. **Add Redis, reliable publication, and transactional outbox.** Provision managed Valkey (Redis-compatible); atomically persist jobs and outbox intents; retry publishing safely and test Redis outages/restarts.
-5. **Implement independently deployable App Platform workers.** Add the separate worker component and pluggable typed handlers; consume Redis jobs directly, record durable attempt state, acknowledge messages safely, and test crash/redelivery behavior.
-6. **Add timeouts, retry/backoff, and dead-letter handling.** Test retry classification, attempt limits, timeouts, permanent failures, and dead-letter retention.
+5. **Implement independently deployable App Platform workers.** Complete for the initial handler: the separate worker consumes BullMQ messages, persists execution state and results, and has PostgreSQL/Redis integration coverage.
+6. **Add timeouts, retry/backoff, and dead-letter handling.** Complete for the current handler contract: per-attempt timeouts, exponential queue backoff, and durable dead-letter persistence are implemented.
 7. **Add queue visibility and operational controls.** Report backlog depth/lag, support cancellation and drain/resume, and secure operator endpoints.
 8. **Add delayed and recurring scheduling.** Persist schedules, run a recoverable scheduler, publish jobs no earlier than their due time, and define missed/overlapping run behavior.
 9. **Add observability and production hardening.** Emit structured logs and required metrics; add alerts, retention, backup/recovery, load, and failure tests.

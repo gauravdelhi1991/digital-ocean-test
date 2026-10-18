@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { Queue } from "bullmq";
 import { Pool } from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../src/app";
 import {
   createJobQueuePublisher,
   parseRedisConnectionOptions,
 } from "../../src/job-queue";
+import { createJobWorker } from "../../src/job-worker";
 import { PostgresJobStore, type OutboxStore } from "../../src/jobs";
 import { OutboxPublisher } from "../../src/outbox-publisher";
 import { runMigrations } from "../../src/migration-runner";
@@ -17,10 +18,14 @@ const redisUrl = process.env.TEST_REDIS_URL;
 
 describe.skipIf(!databaseUrl || !redisUrl)("transactional outbox integration", () => {
   const queueName = `outbox-test-${randomUUID()}`;
+  const workerQueueName = `worker-test-${randomUUID()}`;
   let pool: Pool;
   let store: PostgresJobStore;
   let queue: Queue;
+  let workerQueue: Queue;
+  let workerQueuePublisher: JobQueuePublisher;
   let queuePublisher: JobQueuePublisher;
+  let jobWorker: ReturnType<typeof createJobWorker>;
 
   function storeForJob(jobId: string): OutboxStore {
     return {
@@ -40,14 +45,24 @@ describe.skipIf(!databaseUrl || !redisUrl)("transactional outbox integration", (
     queue = new Queue(queueName, {
       connection: parseRedisConnectionOptions(redisUrl),
     });
+    workerQueue = new Queue(workerQueueName, {
+      connection: parseRedisConnectionOptions(redisUrl),
+    });
     queuePublisher = createJobQueuePublisher(redisUrl, queueName);
+    workerQueuePublisher = createJobQueuePublisher(redisUrl, workerQueueName);
     await runMigrations(pool);
+    jobWorker = createJobWorker(redisUrl, store, console, workerQueueName, 1);
+    await jobWorker.waitUntilReady();
   });
 
   afterAll(async () => {
+    await jobWorker.close();
     await queue.obliterate({ force: true });
+    await workerQueue.obliterate({ force: true });
     await queue.close();
+    await workerQueue.close();
     await queuePublisher.close();
+    await workerQueuePublisher.close();
     await pool.end();
   });
 
@@ -78,6 +93,11 @@ describe.skipIf(!databaseUrl || !redisUrl)("transactional outbox integration", (
 
       const queuedJob = await queue.getJob(job.id);
       expect(queuedJob?.data).toEqual({ jobId: job.id });
+      expect(queuedJob?.opts).toMatchObject({
+        attempts: job.maxRetries + 1,
+        backoff: { type: "custom", delay: 1000 },
+        priority: 101 - job.priority,
+      });
       const published = await pool.query(
         `SELECT jobs.status, outbox.published_at
          FROM jobs
@@ -241,6 +261,133 @@ describe.skipIf(!databaseUrl || !redisUrl)("transactional outbox integration", (
       expect(await queue.getJobCounts("waiting")).toMatchObject({ waiting: 1 });
     } finally {
       await (await queue.getJob(job.id))?.remove();
+      await pool.query("DELETE FROM jobs WHERE id = $1", [job.id]);
+    }
+  });
+
+  it("consumes a queued job and persists its result", async () => {
+    const job = await store.createJob({
+      payload: { type: "example", marker: randomUUID() },
+      priority: 0,
+      maxRetries: 1,
+      timeoutMs: 30_000,
+    });
+
+    try {
+      const publisher = new OutboxPublisher(
+        storeForJob(job.id),
+        workerQueuePublisher,
+        console,
+      );
+      await expect(publisher.publishNext()).resolves.toBe(true);
+      await vi.waitFor(
+        async () => {
+          const completed = await store.getJob(job.id);
+          expect(completed?.status).toBe("succeeded");
+        },
+        { timeout: 10_000 },
+      );
+
+      const completed = await store.getJob(job.id);
+      expect(completed).toMatchObject({
+        status: "succeeded",
+        attemptCount: 1,
+        result: { payload: job.payload },
+      });
+    } finally {
+      await (await workerQueue.getJob(job.id))?.remove();
+      await pool.query("DELETE FROM jobs WHERE id = $1", [job.id]);
+    }
+  });
+
+  it("executes a message before its PostgreSQL publication acknowledgement", async () => {
+    const job = await store.createJob({
+      payload: { type: "example", marker: randomUUID() },
+      priority: 0,
+      maxRetries: 1,
+      timeoutMs: 30_000,
+    });
+    let markStarted!: () => void;
+    let allowMark!: () => void;
+    const markStartedPromise = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const acknowledgementGate = new Promise<void>((resolve) => {
+      allowMark = resolve;
+    });
+    const delayedAcknowledgementStore: OutboxStore = {
+      claimNextOutboxMessage: () => store.claimNextOutboxMessage(job.id),
+      markOutboxMessagePublished: async (jobId) => {
+        markStarted();
+        await acknowledgementGate;
+        await store.markOutboxMessagePublished(jobId);
+      },
+      scheduleOutboxRetry: (jobId, delayMs, error) =>
+        store.scheduleOutboxRetry(jobId, delayMs, error),
+    };
+    let publishTask: Promise<boolean> | undefined;
+
+    try {
+      const publisher = new OutboxPublisher(
+        delayedAcknowledgementStore,
+        workerQueuePublisher,
+        console,
+      );
+      publishTask = publisher.publishNext();
+      await markStartedPromise;
+      await vi.waitFor(
+        async () => {
+          const completed = await store.getJob(job.id);
+          expect(completed?.status).toBe("succeeded");
+        },
+        { timeout: 10_000 },
+      );
+      allowMark();
+      await expect(publishTask).resolves.toBe(true);
+    } finally {
+      allowMark();
+      await publishTask?.catch(() => {});
+      await (await workerQueue.getJob(job.id))?.remove();
+      await pool.query("DELETE FROM jobs WHERE id = $1", [job.id]);
+    }
+  });
+
+  it("stores exhausted worker failures in the PostgreSQL dead-letter table", async () => {
+    const job = await store.createJob({
+      payload: { type: "unsupported", marker: randomUUID() },
+      priority: 0,
+      maxRetries: 1,
+      timeoutMs: 30_000,
+    });
+
+    try {
+      const publisher = new OutboxPublisher(
+        storeForJob(job.id),
+        workerQueuePublisher,
+        console,
+      );
+      await expect(publisher.publishNext()).resolves.toBe(true);
+      await vi.waitFor(
+        async () => {
+          const deadLettered = await store.getJob(job.id);
+          expect(deadLettered?.status).toBe("dead-lettered");
+        },
+        { timeout: 15_000 },
+      );
+
+      const result = await pool.query(
+        `SELECT payload, attempt_count, error
+         FROM job_dead_letters WHERE job_id = $1`,
+        [job.id],
+      );
+      expect(result.rows[0]).toMatchObject({
+        payload: job.payload,
+        attempt_count: 2,
+        error: "Unsupported job payload type: unsupported",
+      });
+    } finally {
+      await (await workerQueue.getJob(job.id))?.remove();
+      await pool.query("DELETE FROM job_dead_letters WHERE job_id = $1", [job.id]);
       await pool.query("DELETE FROM jobs WHERE id = $1", [job.id]);
     }
   });
