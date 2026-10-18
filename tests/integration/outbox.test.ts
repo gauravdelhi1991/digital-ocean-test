@@ -83,55 +83,6 @@ describe.skipIf(!databaseUrl || !redisUrl)("transactional outbox integration", (
       timeoutMs: 30_000,
     });
 
-    it("does not publish a scheduled job before its due time", async () => {
-      const scheduledAt = new Date(Date.now() + 60_000);
-      const job = await store.createJob({
-        payload: { marker: randomUUID() },
-        priority: 0,
-        maxRetries: 0,
-        timeoutMs: 30_000,
-        scheduledAt,
-      });
-
-      try {
-        expect(job.scheduledAt).toBe(scheduledAt.toISOString());
-        await expect(
-          pool.query(
-            "SELECT available_at FROM job_outbox WHERE job_id = $1",
-            [job.id],
-          ),
-        ).resolves.toMatchObject({
-          rows: [expect.objectContaining({ available_at: scheduledAt })],
-        });
-
-        const publisher = new OutboxPublisher(
-          storeForJob(job.id),
-          queuePublisher,
-          console,
-        );
-        await expect(publisher.publishNext()).resolves.toBe(false);
-        await expect(queue.getJob(job.id)).resolves.toBeUndefined();
-        await expect(store.getJob(job.id)).resolves.toMatchObject({
-          status: "accepted",
-          scheduledAt: scheduledAt.toISOString(),
-        });
-
-        await pool.query(
-          "UPDATE job_outbox SET available_at = NOW() WHERE job_id = $1",
-          [job.id],
-        );
-        await expect(publisher.publishNext()).resolves.toBe(true);
-        await expect(queue.getJob(job.id)).resolves.toBeDefined();
-        await expect(store.getJob(job.id)).resolves.toMatchObject({
-          status: "queued",
-          scheduledAt: scheduledAt.toISOString(),
-        });
-      } finally {
-        await (await queue.getJob(job.id))?.remove();
-        await pool.query("DELETE FROM jobs WHERE id = $1", [job.id]);
-      }
-    });
-
     try {
       const initial = await pool.query(
         `SELECT jobs.status, outbox.published_at
@@ -165,6 +116,55 @@ describe.skipIf(!databaseUrl || !redisUrl)("transactional outbox integration", (
       );
       expect(published.rows[0]?.status).toBe("queued");
       expect(published.rows[0]?.published_at).toBeInstanceOf(Date);
+    } finally {
+      await (await queue.getJob(job.id))?.remove();
+      await pool.query("DELETE FROM jobs WHERE id = $1", [job.id]);
+    }
+  });
+
+  it("does not publish a scheduled job before its due time", async () => {
+    const scheduledAt = new Date(Date.now() + 60_000);
+    const job = await store.createJob({
+      payload: { marker: randomUUID() },
+      priority: 0,
+      maxRetries: 0,
+      timeoutMs: 30_000,
+      scheduledAt,
+    });
+
+    try {
+      expect(job.scheduledAt).toBe(scheduledAt.toISOString());
+      await expect(
+        pool.query(
+          "SELECT available_at FROM job_outbox WHERE job_id = $1",
+          [job.id],
+        ),
+      ).resolves.toMatchObject({
+        rows: [expect.objectContaining({ available_at: scheduledAt })],
+      });
+
+      const publisher = new OutboxPublisher(
+        storeForJob(job.id),
+        queuePublisher,
+        console,
+      );
+      await expect(publisher.publishNext()).resolves.toBe(false);
+      await expect(queue.getJob(job.id)).resolves.toBeUndefined();
+      await expect(store.getJob(job.id)).resolves.toMatchObject({
+        status: "accepted",
+        scheduledAt: scheduledAt.toISOString(),
+      });
+
+      await pool.query(
+        "UPDATE job_outbox SET available_at = NOW() WHERE job_id = $1",
+        [job.id],
+      );
+      await expect(publisher.publishNext()).resolves.toBe(true);
+      await expect(queue.getJob(job.id)).resolves.toBeDefined();
+      await expect(store.getJob(job.id)).resolves.toMatchObject({
+        status: "queued",
+        scheduledAt: scheduledAt.toISOString(),
+      });
     } finally {
       await (await queue.getJob(job.id))?.remove();
       await pool.query("DELETE FROM jobs WHERE id = $1", [job.id]);
