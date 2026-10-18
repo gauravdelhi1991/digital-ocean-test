@@ -140,6 +140,13 @@ resource "digitalocean_app" "jobs" {
       }
 
       env {
+        key   = "OPERATOR_TOKEN"
+        value = var.operator_token
+        type  = "SECRET"
+        scope = "RUN_TIME"
+      }
+
+      env {
         key   = "NODE_ENV"
         value = "production"
         type  = "GENERAL"

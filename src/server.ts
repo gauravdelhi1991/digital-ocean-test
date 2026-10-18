@@ -3,6 +3,7 @@ import { createDatabasePool } from "./database";
 import { createJobQueuePublisher } from "./job-queue";
 import { PostgresJobStore } from "./jobs";
 import { OutboxPublisher } from "./outbox-publisher";
+import { createQueueOperations } from "./queue-operations";
 
 async function main(): Promise<void> {
   const connectionString = process.env.DATABASE_URL;
@@ -13,11 +14,22 @@ async function main(): Promise<void> {
   if (!redisConnectionString) {
     throw new Error("REDIS_URL must be configured");
   }
+  const operatorToken = process.env.OPERATOR_TOKEN;
+  if (!operatorToken || operatorToken.length < 32) {
+    throw new Error("OPERATOR_TOKEN must contain at least 32 characters");
+  }
 
   const pool = createDatabasePool(connectionString);
   const store = new PostgresJobStore(pool);
+  const queueOperations = createQueueOperations(redisConnectionString, store, {
+    warn(fields, message) {
+      console.warn(message, fields);
+    },
+  });
   const app = buildApp(store, {
     logger: { level: process.env.LOG_LEVEL ?? "info" },
+    operatorToken,
+    queueOperations,
   });
   const queue = createJobQueuePublisher(redisConnectionString);
   const publisher = new OutboxPublisher(store, queue, app.log);
@@ -32,6 +44,7 @@ async function main(): Promise<void> {
     abortController.abort();
     await publisherTask;
     await queue.close();
+    await queueOperations.close();
     await pool.end();
   });
 

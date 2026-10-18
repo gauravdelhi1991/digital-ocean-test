@@ -52,10 +52,11 @@ Initial API:
 
 The initial worker dispatches on `payload.type` and supports only `example`, which returns the submitted payload. Unsupported types fail, follow the configured retry policy, and enter the PostgreSQL dead-letter table when retries are exhausted.
 
-Later API:
+Operational API (operator bearer token required):
 
-- `GET /jobs/queue-depth`: queued, running, delayed, and dead-letter counts plus backlog lag.
-- Cancellation and drain/resume operations for pending work and graceful worker shutdown.
+- `GET /ops/queue-depth`: accepted, queued, running, delayed, and dead-letter counts, oldest backlog lag, and drain state.
+- `POST /ops/drain` and `POST /ops/resume`: globally stop/resume new worker claims while active jobs finish.
+- `POST /ops/jobs/{id}/cancel`: cancel pending work or request cooperative cancellation of a running handler.
 
 The PostgreSQL `jobs` table stores payload, scheduling/execution options, status, attempt count, last error, result, and timestamps. Jobs remain `accepted` until publication succeeds, then remain `queued` until a worker processes them. Exhausted failures are stored transactionally in `job_dead_letters`; schedule tables are added in the scheduling milestone.
 

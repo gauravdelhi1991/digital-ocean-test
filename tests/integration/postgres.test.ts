@@ -49,6 +49,7 @@ describe.skipIf(!databaseUrl)("PostgreSQL job persistence", () => {
         result: null,
         startedAt: null,
         completedAt: null,
+        cancellationRequestedAt: null,
       });
       expect(job).toHaveProperty("createdAt");
       expect(job).toHaveProperty("updatedAt");
@@ -78,6 +79,119 @@ describe.skipIf(!databaseUrl)("PostgreSQL job persistence", () => {
     } finally {
       await app.close();
       await pool.query("DELETE FROM jobs WHERE payload->>'marker' = $1", [marker]);
+    }
+  });
+
+  it("cancels pending jobs and removes unpublished outbox work", async () => {
+    const marker = randomUUID();
+    const job = await store.createJob({
+      payload: { marker },
+      priority: 0,
+      maxRetries: 0,
+      timeoutMs: 5000,
+    });
+
+    try {
+      const result = await store.requestJobCancellation(job.id);
+      expect(result.outcome).toBe("cancelled");
+      if (result.outcome !== "cancelled") {
+        throw new Error(`Unexpected cancellation outcome: ${result.outcome}`);
+      }
+      expect(result.job.status).toBe("cancelled");
+      expect(result.job.completedAt).not.toBeNull();
+      expect(
+        await pool.query("SELECT 1 FROM job_outbox WHERE job_id = $1", [job.id]),
+      ).toMatchObject({ rowCount: 0 });
+      await expect(store.getJob(job.id)).resolves.toMatchObject({
+        status: "cancelled",
+        cancellationRequestedAt: null,
+      });
+    } finally {
+      await pool.query("DELETE FROM jobs WHERE id = $1", [job.id]);
+    }
+  });
+
+  it("records cooperative cancellation requests for running jobs", async () => {
+    const marker = randomUUID();
+    const job = await store.createJob({
+      payload: { marker },
+      priority: 0,
+      maxRetries: 0,
+      timeoutMs: 5000,
+    });
+
+    try {
+      await expect(store.startJobAttempt(job.id)).resolves.toMatchObject({
+        status: "running",
+        cancellationRequestedAt: null,
+      });
+      const result = await store.requestJobCancellation(job.id);
+      expect(result.outcome).toBe("requested");
+      expect(await store.isCancellationRequested(job.id)).toBe(true);
+      await expect(store.markJobSucceeded(job.id, { ignored: true })).resolves.toBe(
+        "cancelled",
+      );
+      await expect(store.getJob(job.id)).resolves.toMatchObject({
+        status: "cancelled",
+        result: null,
+      });
+    } finally {
+      await pool.query("DELETE FROM jobs WHERE id = $1", [job.id]);
+    }
+  });
+
+  it("cancels instead of retrying when cancellation wins a failure transition", async () => {
+    const job = await store.createJob({
+      payload: { marker: randomUUID() },
+      priority: 0,
+      maxRetries: 1,
+      timeoutMs: 5000,
+    });
+
+    try {
+      await store.startJobAttempt(job.id);
+      await expect(store.requestJobCancellation(job.id)).resolves.toMatchObject({
+        outcome: "requested",
+      });
+
+      await expect(
+        store.markJobRetryable(job.id, "temporary failure"),
+      ).resolves.toBe("cancelled");
+      await expect(store.getJob(job.id)).resolves.toMatchObject({
+        status: "cancelled",
+        lastError: null,
+      });
+    } finally {
+      await pool.query("DELETE FROM jobs WHERE id = $1", [job.id]);
+    }
+  });
+
+  it("cancels instead of dead-lettering when cancellation wins the failure transition", async () => {
+    const job = await store.createJob({
+      payload: { marker: randomUUID() },
+      priority: 0,
+      maxRetries: 0,
+      timeoutMs: 5000,
+    });
+
+    try {
+      await store.startJobAttempt(job.id);
+      await expect(store.requestJobCancellation(job.id)).resolves.toMatchObject({
+        outcome: "requested",
+      });
+
+      await expect(
+        store.markJobDeadLettered(job.id, "permanent failure"),
+      ).resolves.toBe("cancelled");
+      await expect(store.getJob(job.id)).resolves.toMatchObject({
+        status: "cancelled",
+        lastError: null,
+      });
+      await expect(
+        pool.query("SELECT 1 FROM job_dead_letters WHERE job_id = $1", [job.id]),
+      ).resolves.toMatchObject({ rowCount: 0 });
+    } finally {
+      await pool.query("DELETE FROM jobs WHERE id = $1", [job.id]);
     }
   });
 });

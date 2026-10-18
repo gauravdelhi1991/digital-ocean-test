@@ -17,6 +17,7 @@ export async function runMigrations(pool: Pool): Promise<void> {
       "001_create_jobs",
       "002_create_job_outbox",
       "003_create_job_dead_letters",
+      "004_add_job_cancellation",
     ]) {
       const applied = await client.query(
         "SELECT 1 FROM schema_migrations WHERE version = $1",

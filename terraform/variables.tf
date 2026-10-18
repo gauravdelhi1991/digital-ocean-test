@@ -4,6 +4,17 @@ variable "digitalocean_token" {
   sensitive   = true
 }
 
+variable "operator_token" {
+  description = "Bearer token for operational API routes. Supply through TF_VAR_operator_token."
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = length(var.operator_token) >= 32
+    error_message = "operator_token must contain at least 32 characters."
+  }
+}
+
 variable "database_cluster_name" {
   description = "Name of the managed PostgreSQL cluster."
   type        = string

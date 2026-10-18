@@ -31,12 +31,28 @@ export interface Job {
   updatedAt: string;
   startedAt: string | null;
   completedAt: string | null;
+  cancellationRequestedAt: string | null;
 }
+
+export interface QueueDatabaseMetrics {
+  accepted: number;
+  running: number;
+  deadLettered: number;
+  backlogLagSeconds: number | null;
+}
+
+export type JobCancellationResult =
+  | { outcome: "cancelled"; job: Job }
+  | { outcome: "requested"; job: Job }
+  | { outcome: "not-cancellable"; status: JobStatus }
+  | { outcome: "not-found" };
 
 export interface JobStore {
   createJob(input: NewJob): Promise<Job>;
   getJob(id: string): Promise<Job | null>;
   checkConnection(): Promise<void>;
+  getQueueDatabaseMetrics(): Promise<QueueDatabaseMetrics>;
+  requestJobCancellation(id: string): Promise<JobCancellationResult>;
 }
 
 export interface ClaimedOutboxMessage {
@@ -54,9 +70,11 @@ export interface OutboxStore {
 
 export interface WorkerJobStore {
   startJobAttempt(jobId: string): Promise<Job | null>;
-  markJobRetryable(jobId: string, error: string): Promise<void>;
-  markJobSucceeded(jobId: string, result: unknown): Promise<void>;
-  markJobDeadLettered(jobId: string, error: string): Promise<void>;
+  markJobRetryable(jobId: string, error: string): Promise<"retryable" | "cancelled">;
+  markJobSucceeded(jobId: string, result: unknown): Promise<"succeeded" | "cancelled">;
+  markJobDeadLettered(jobId: string, error: string): Promise<"dead-lettered" | "cancelled">;
+  isCancellationRequested(jobId: string): Promise<boolean>;
+  markJobCancelled(jobId: string): Promise<void>;
 }
 
 interface JobRow {
@@ -73,11 +91,13 @@ interface JobRow {
   updated_at: Date;
   started_at: Date | null;
   completed_at: Date | null;
+  cancellation_requested_at: Date | null;
 }
 
 const jobColumns = `
   id, payload, priority, max_retries, timeout_ms, attempt_count, status,
-  last_error, result, created_at, updated_at, started_at, completed_at
+  last_error, result, created_at, updated_at, started_at, completed_at,
+  cancellation_requested_at
 `;
 
 function mapJob(row: JobRow): Job {
@@ -95,6 +115,8 @@ function mapJob(row: JobRow): Job {
     updatedAt: row.updated_at.toISOString(),
     startedAt: row.started_at?.toISOString() ?? null,
     completedAt: row.completed_at?.toISOString() ?? null,
+    cancellationRequestedAt:
+      row.cancellation_requested_at?.toISOString() ?? null,
   };
 }
 
@@ -138,6 +160,93 @@ export class PostgresJobStore implements JobStore, OutboxStore, WorkerJobStore {
 
   async checkConnection(): Promise<void> {
     await this.pool.query("SELECT 1");
+  }
+
+  async getQueueDatabaseMetrics(): Promise<QueueDatabaseMetrics> {
+    const result = await this.pool.query<{
+      accepted: string;
+      running: string;
+      dead_lettered: string;
+      backlog_lag_seconds: number | null;
+    }>(`
+      SELECT
+        COUNT(*) FILTER (WHERE status = 'accepted')::text AS accepted,
+        COUNT(*) FILTER (WHERE status = 'running')::text AS running,
+        COUNT(*) FILTER (WHERE status = 'dead-lettered')::text AS dead_lettered,
+        CASE
+          WHEN COUNT(*) FILTER (WHERE status IN ('accepted', 'queued')) = 0
+            THEN NULL
+          ELSE GREATEST(
+            0,
+            EXTRACT(EPOCH FROM NOW() - MIN(created_at)
+              FILTER (WHERE status IN ('accepted', 'queued')))
+          )
+        END AS backlog_lag_seconds
+      FROM jobs
+    `);
+    const row = result.rows[0];
+    if (!row) {
+      throw new Error("PostgreSQL did not return queue metrics");
+    }
+    return {
+      accepted: Number(row.accepted),
+      running: Number(row.running),
+      deadLettered: Number(row.dead_lettered),
+      backlogLagSeconds:
+        row.backlog_lag_seconds === null ? null : Number(row.backlog_lag_seconds),
+    };
+  }
+
+  async requestJobCancellation(id: string): Promise<JobCancellationResult> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const pending = await client.query<JobRow>(
+        `UPDATE jobs
+         SET status = 'cancelled', completed_at = NOW(), updated_at = NOW()
+         WHERE id = $1 AND status IN ('accepted', 'queued')
+         RETURNING ${jobColumns}`,
+        [id],
+      );
+      const pendingJob = pending.rows[0];
+      if (pendingJob) {
+        await client.query(
+          "DELETE FROM job_outbox WHERE job_id = $1 AND published_at IS NULL",
+          [id],
+        );
+        await client.query("COMMIT");
+        return { outcome: "cancelled", job: mapJob(pendingJob) };
+      }
+
+      const running = await client.query<JobRow>(
+        `UPDATE jobs
+         SET cancellation_requested_at = COALESCE(cancellation_requested_at, NOW()),
+             updated_at = NOW()
+         WHERE id = $1 AND status = 'running'
+         RETURNING ${jobColumns}`,
+        [id],
+      );
+      const runningJob = running.rows[0];
+      if (runningJob) {
+        await client.query("COMMIT");
+        return { outcome: "requested", job: mapJob(runningJob) };
+      }
+
+      const existing = await client.query<{ status: JobStatus }>(
+        "SELECT status FROM jobs WHERE id = $1",
+        [id],
+      );
+      await client.query("COMMIT");
+      const status = existing.rows[0]?.status;
+      return status
+        ? { outcome: "not-cancellable", status }
+        : { outcome: "not-found" };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async claimNextOutboxMessage(jobId?: string): Promise<ClaimedOutboxMessage | null> {
@@ -226,6 +335,7 @@ export class PostgresJobStore implements JobStore, OutboxStore, WorkerJobStore {
        SET status = 'running', attempt_count = attempt_count + 1,
            started_at = COALESCE(started_at, NOW()), updated_at = NOW()
        WHERE id = $1 AND status IN ('accepted', 'queued', 'running')
+         AND cancellation_requested_at IS NULL
        RETURNING ${jobColumns}`,
       [jobId],
     );
@@ -244,32 +354,100 @@ export class PostgresJobStore implements JobStore, OutboxStore, WorkerJobStore {
     return null;
   }
 
-  async markJobRetryable(jobId: string, error: string): Promise<void> {
+  async markJobRetryable(
+    jobId: string,
+    error: string,
+  ): Promise<"retryable" | "cancelled"> {
     const result = await this.pool.query(
       `UPDATE jobs
        SET status = 'queued', last_error = $2, updated_at = NOW()
-       WHERE id = $1 AND status = 'running'`,
+       WHERE id = $1 AND status = 'running'
+         AND cancellation_requested_at IS NULL`,
       [jobId, error.slice(0, 4000)],
     );
-    if (result.rowCount !== 1) {
-      throw new Error(`Running job ${jobId} could not be scheduled for retry`);
+    if (result.rowCount === 1) {
+      return "retryable";
     }
+    return this.markRunningJobCancelled(jobId, "retry");
   }
 
-  async markJobSucceeded(jobId: string, result: unknown): Promise<void> {
+  async markJobSucceeded(
+    jobId: string,
+    result: unknown,
+  ): Promise<"succeeded" | "cancelled"> {
     const update = await this.pool.query(
       `UPDATE jobs
        SET status = 'succeeded', result = $2, last_error = NULL,
            completed_at = NOW(), updated_at = NOW()
-       WHERE id = $1 AND status = 'running'`,
+       WHERE id = $1 AND status = 'running'
+         AND cancellation_requested_at IS NULL`,
       [jobId, result],
     );
-    if (update.rowCount !== 1) {
-      throw new Error(`Running job ${jobId} could not be marked succeeded`);
+    if (update.rowCount === 1) {
+      return "succeeded";
+    }
+
+    const cancelled = await this.pool.query(
+      `UPDATE jobs
+       SET status = 'cancelled', result = NULL, last_error = NULL,
+           completed_at = NOW(), updated_at = NOW()
+       WHERE id = $1 AND status = 'running'
+         AND cancellation_requested_at IS NOT NULL`,
+      [jobId],
+    );
+    if (cancelled.rowCount === 1) {
+      return "cancelled";
+    }
+    throw new Error(`Running job ${jobId} could not be marked succeeded`);
+  }
+
+  async isCancellationRequested(jobId: string): Promise<boolean> {
+    const result = await this.pool.query<{ requested: boolean }>(
+      `SELECT cancellation_requested_at IS NOT NULL AS requested
+       FROM jobs WHERE id = $1 AND status = 'running'`,
+      [jobId],
+    );
+    return result.rows[0]?.requested ?? false;
+  }
+
+  async markJobCancelled(jobId: string): Promise<void> {
+    const result = await this.pool.query(
+      `UPDATE jobs
+       SET status = 'cancelled', result = NULL, last_error = NULL,
+           completed_at = NOW(), updated_at = NOW()
+       WHERE id = $1 AND status = 'running'
+         AND cancellation_requested_at IS NOT NULL`,
+      [jobId],
+    );
+    if (result.rowCount !== 1) {
+      throw new Error(`Running job ${jobId} could not be marked cancelled`);
     }
   }
 
-  async markJobDeadLettered(jobId: string, error: string): Promise<void> {
+  private async markRunningJobCancelled(
+    jobId: string,
+    operation: string,
+  ): Promise<"cancelled"> {
+    const result = await this.pool.query(
+      `UPDATE jobs
+       SET status = 'cancelled', result = NULL, last_error = NULL,
+           completed_at = NOW(), updated_at = NOW()
+       WHERE id = $1 AND status = 'running'
+         AND cancellation_requested_at IS NOT NULL`,
+      [jobId],
+    );
+    if (result.rowCount !== 1) {
+      throw new Error(
+        `Running job ${jobId} could not be finalized after the ${operation} failure`,
+      );
+    }
+    return "cancelled";
+  }
+
+  async markJobDeadLettered(
+    jobId: string,
+    error: string,
+  ): Promise<"dead-lettered" | "cancelled"> {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -281,11 +459,24 @@ export class PostgresJobStore implements JobStore, OutboxStore, WorkerJobStore {
          SET status = 'dead-lettered', last_error = $2,
              completed_at = NOW(), updated_at = NOW()
          WHERE id = $1 AND status = 'running'
+           AND cancellation_requested_at IS NULL
          RETURNING payload, attempt_count`,
         [jobId, error.slice(0, 4000)],
       );
       const row = result.rows[0];
       if (!row) {
+        const cancelled = await client.query(
+          `UPDATE jobs
+           SET status = 'cancelled', result = NULL, last_error = NULL,
+               completed_at = NOW(), updated_at = NOW()
+           WHERE id = $1 AND status = 'running'
+             AND cancellation_requested_at IS NOT NULL`,
+          [jobId],
+        );
+        if (cancelled.rowCount === 1) {
+          await client.query("COMMIT");
+          return "cancelled";
+        }
         throw new Error(`Running job ${jobId} could not be dead-lettered`);
       }
 
@@ -300,6 +491,7 @@ export class PostgresJobStore implements JobStore, OutboxStore, WorkerJobStore {
         [jobId, row.payload, row.attempt_count, error.slice(0, 4000)],
       );
       await client.query("COMMIT");
+      return "dead-lettered";
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;

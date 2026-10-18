@@ -1,6 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app";
 import type { JobStore, NewJob } from "../src/jobs";
+import type { QueueOperations } from "../src/queue-operations";
+
+const operatorToken = "test-operator-token-with-more-than-32-chars";
+const queueDepth = {
+  accepted: 2,
+  queued: 4,
+  running: 1,
+  delayed: 3,
+  deadLettered: 5,
+  backlogLagSeconds: 12,
+  draining: false,
+};
 
 function createStore(overrides: Partial<JobStore> = {}) {
   const createJob = vi.fn(async (input: NewJob) => ({
@@ -14,15 +26,45 @@ function createStore(overrides: Partial<JobStore> = {}) {
     updatedAt: "2026-10-17T00:00:00.000Z",
     startedAt: null,
     completedAt: null,
+    cancellationRequestedAt: null,
   }));
   const getJob = vi.fn(async () => null);
   const checkConnection = vi.fn(async () => {});
+  const getQueueDatabaseMetrics = vi.fn(async () => ({
+    accepted: 0,
+    running: 0,
+    deadLettered: 0,
+    backlogLagSeconds: null,
+  }));
+  const requestJobCancellation = vi.fn(async () => ({ outcome: "not-found" as const }));
   return {
-    store: { createJob, getJob, checkConnection, ...overrides } as JobStore,
+    store: {
+      createJob,
+      getJob,
+      checkConnection,
+      getQueueDatabaseMetrics,
+      requestJobCancellation,
+      ...overrides,
+    } as JobStore,
     createJob,
     getJob,
     checkConnection,
   };
+}
+
+function createQueueOperations(overrides: Partial<QueueOperations> = {}) {
+  const operations: QueueOperations = {
+    getQueueDepth: vi.fn(async () => queueDepth),
+    drain: vi.fn(async () => {}),
+    resume: vi.fn(async () => {}),
+    cancelJob: vi.fn(async () => ({
+      outcome: "cancelled",
+      queueCleanup: "removed",
+    })),
+    close: vi.fn(async () => {}),
+    ...overrides,
+  };
+  return operations;
 }
 
 describe("job submission API", () => {
@@ -95,6 +137,7 @@ describe("job submission API", () => {
       updatedAt: "2026-10-17T00:02:00.000Z",
       startedAt: "2026-10-17T00:01:00.000Z",
       completedAt: "2026-10-17T00:02:00.000Z",
+      cancellationRequestedAt: null,
     };
     const getJob = vi.fn(async () => job);
     const { store } = createStore({ getJob });
@@ -225,6 +268,104 @@ describe("job submission API", () => {
       status: "unavailable",
       database: "unavailable",
     });
+    await app.close();
+  });
+
+  it("requires operator authorization for visibility and queue controls", async () => {
+    const { store } = createStore();
+    const queueOperations = createQueueOperations();
+    const app = buildApp(store, { logger: false, queueOperations, operatorToken });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/ops/queue-depth",
+      headers: { authorization: "Bearer incorrect-operator-token" },
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(queueOperations.getQueueDepth).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("returns queue counts and backlog lag to authenticated operators", async () => {
+    const { store } = createStore();
+    const queueOperations = createQueueOperations();
+    const app = buildApp(store, { logger: false, queueOperations, operatorToken });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/ops/queue-depth",
+      headers: { authorization: `Bearer ${operatorToken}` },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual(queueDepth);
+    expect(queueOperations.getQueueDepth).toHaveBeenCalledOnce();
+    await app.close();
+  });
+
+  it("starts and resumes a queue drain for authenticated operators", async () => {
+    const { store } = createStore();
+    const queueOperations = createQueueOperations();
+    const app = buildApp(store, { logger: false, queueOperations, operatorToken });
+
+    const headers = { authorization: `Bearer ${operatorToken}` };
+    const drain = await app.inject({ method: "POST", url: "/ops/drain", headers });
+    const resume = await app.inject({ method: "POST", url: "/ops/resume", headers });
+
+    expect(drain.statusCode).toBe(200);
+    expect(drain.json()).toEqual({ status: "draining" });
+    expect(resume.statusCode).toBe(200);
+    expect(resume.json()).toEqual({ status: "resumed" });
+    expect(queueOperations.drain).toHaveBeenCalledOnce();
+    expect(queueOperations.resume).toHaveBeenCalledOnce();
+    await app.close();
+  });
+
+  it("reports pending and running cancellation outcomes", async () => {
+    const { store } = createStore();
+    const queueOperations = createQueueOperations({
+      cancelJob: vi
+        .fn()
+        .mockResolvedValueOnce({ outcome: "cancelled", queueCleanup: "removed" })
+        .mockResolvedValueOnce({ outcome: "requested" }),
+    });
+    const app = buildApp(store, { logger: false, queueOperations, operatorToken });
+
+    const headers = { authorization: `Bearer ${operatorToken}` };
+    const pending = await app.inject({
+      method: "POST",
+      url: "/ops/jobs/d2719a42-75b1-4339-b4f5-c640f86aed7f/cancel",
+      headers,
+    });
+    const running = await app.inject({
+      method: "POST",
+      url: "/ops/jobs/d2719a42-75b1-4339-b4f5-c640f86aed7f/cancel",
+      headers,
+    });
+
+    expect(pending.statusCode).toBe(200);
+    expect(pending.json()).toEqual({
+      status: "cancelled",
+      queueCleanup: "removed",
+    });
+    expect(running.statusCode).toBe(202);
+    expect(running.json()).toEqual({ status: "cancellation-requested" });
+    await app.close();
+  });
+
+  it("does not expose operator routes when the token is not configured", async () => {
+    const { store } = createStore();
+    const app = buildApp(store, { logger: false, queueOperations: createQueueOperations() });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/ops/queue-depth",
+      headers: { authorization: `Bearer ${operatorToken}` },
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toEqual({ error: "Operator access is not configured" });
     await app.close();
   });
 });
