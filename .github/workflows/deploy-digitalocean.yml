@@ -52,6 +52,7 @@ jobs:
       inputs.operation == 'plan' &&
       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/feature/'))
     runs-on: ubuntu-latest
+    environment: ${{ github.ref == 'refs/heads/main' && 'digitalocean-production' || 'digitalocean-candidate' }}
     env:
       TF_VAR_digitalocean_token: ${{ secrets.DIGITALOCEAN_TOKEN }}
       TF_VAR_operator_token: ${{ secrets.OPERATOR_TOKEN }}
