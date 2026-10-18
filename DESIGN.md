@@ -47,11 +47,11 @@ Scheduler (later) ---> PostgreSQL schedules ---> Redis delayed/recurring jobs
 Initial API:
 
 - `POST /jobs`: validate a JSON object payload and optional `priority`, `maxRetries`, and `timeoutMs`; persist it and return its ID with `status: accepted`.
+- `GET /jobs/{id}`: return the stored job, including its current state, attempt count, last error, result, and lifecycle timestamps; return `404` for an unknown UUID.
 - `GET /health/live` and `GET /health/ready`: process liveness and database readiness.
 
 Later API:
 
-- `GET /jobs/{id}`: state, attempts, last error, result, and lifecycle timestamps.
 - `GET /jobs/queue-depth`: queued, running, delayed, and dead-letter counts plus backlog lag.
 - Cancellation and drain/resume operations for pending work and graceful worker shutdown.
 

@@ -11,6 +11,8 @@ const submitJobSchema = z
   })
   .strict();
 
+const jobParamsSchema = z.object({ id: z.string().uuid() });
+
 export function buildApp(
   store: JobStore,
   options: { logger?: FastifyServerOptions["logger"] } = {},
@@ -29,6 +31,30 @@ export function buildApp(
     } catch (error) {
       request.log.error({ err: error }, "Database readiness check failed");
       return reply.code(503).send({ status: "unavailable", database: "unavailable" });
+    }
+  });
+
+  app.get("/jobs/:id", async (request, reply) => {
+    const parsed = jobParamsSchema.safeParse(request.params);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: "Invalid job ID",
+        details: parsed.error.issues.map((issue) => ({
+          path: issue.path.join("."),
+          message: issue.message,
+        })),
+      });
+    }
+
+    try {
+      const job = await store.getJob(parsed.data.id);
+      if (!job) {
+        return reply.code(404).send({ error: "Job not found" });
+      }
+      return job;
+    } catch (error) {
+      request.log.error({ err: error }, "Job status could not be retrieved");
+      return reply.code(500).send({ error: "Job status could not be retrieved" });
     }
   });
 

@@ -1,5 +1,5 @@
-import { Pool } from "pg";
 import { buildApp } from "./app";
+import { createDatabasePool } from "./database";
 import { PostgresJobStore } from "./jobs";
 
 async function main(): Promise<void> {
@@ -8,7 +8,7 @@ async function main(): Promise<void> {
     throw new Error("DATABASE_URL must be configured");
   }
 
-  const pool = new Pool({ connectionString });
+  const pool = createDatabasePool(connectionString);
   const app = buildApp(new PostgresJobStore(pool), {
     logger: { level: process.env.LOG_LEVEL ?? "info" },
   });

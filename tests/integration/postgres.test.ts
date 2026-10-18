@@ -45,7 +45,17 @@ describe.skipIf(!databaseUrl)("PostgreSQL job persistence", () => {
         timeoutMs: 5000,
         attemptCount: 0,
         status: "accepted",
+        lastError: null,
+        result: null,
+        startedAt: null,
+        completedAt: null,
       });
+      expect(job).toHaveProperty("createdAt");
+      expect(job).toHaveProperty("updatedAt");
+
+      const statusResponse = await fetch(new URL(`/jobs/${job.id}`, address));
+      expect(statusResponse.status).toBe(200);
+      expect(await statusResponse.json()).toEqual(job);
 
       const result = await pool.query(
         `SELECT payload, priority, max_retries, timeout_ms, attempt_count, status
