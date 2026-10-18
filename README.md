@@ -1,5 +1,7 @@
 # Digital Ocean Test
 
+See [DESIGN.md](./DESIGN.md) for the full system design and implementation plan.
+
 ```mermaid
 flowchart LR
     Client[Client] -->|POST job| API[Job API]

@@ -6,7 +6,7 @@ Build a production-ready REST API for accepting jobs, executing them asynchronou
 
 ## Architecture
 
-Use TypeScript with Fastify for the HTTP API, PostgreSQL as the durable job registry, result store, and dead-letter audit, Valkey (Redis-compatible) with BullMQ for asynchronous delivery, and separate worker processes. The API's durable outbox publisher also schedules one-off delayed jobs; recurring schedules may use a separate scheduler when implemented. Host the API as an App Platform service and execute queued work in a separate App Platform worker component. Keep infrastructure in Terraform and use GitHub Actions for CI, remote-state bootstrap, and manually triggered Terraform plans/applies. Store Terraform state in a private DigitalOcean Spaces bucket. DigitalOcean Functions are not part of this design.
+Use TypeScript with Fastify (the Node.js/TypeScript framework, not Python's FastAPI) for the HTTP API, PostgreSQL as the durable job registry, result store, and dead-letter audit, Valkey (Redis-compatible) with BullMQ for asynchronous delivery, and separate worker processes. The API's durable outbox publisher also schedules one-off delayed jobs; recurring schedules may use a separate scheduler when implemented. Host the API as an App Platform service and execute queued work in a separate App Platform worker component. Keep infrastructure in Terraform and use GitHub Actions for CI, remote-state bootstrap, and manually triggered Terraform plans/applies. Store Terraform state in a private DigitalOcean Spaces bucket. DigitalOcean Functions are not part of this design.
 
 ```text
 Client
@@ -66,13 +66,13 @@ The PostgreSQL `jobs` table stores payload, scheduling/execution options, status
 - A timeout applies to each individual execution attempt.
 - One-off delayed jobs become eligible no earlier than `scheduledAt`. The outbox publisher is the recoverable scheduler: it polls durable PostgreSQL outbox entries and publishes only when `available_at` is due. Recurring definitions, execution history, and missed/overlap policies remain future work.
 - Drain stops workers claiming new jobs while in-flight jobs finish. Cancellation is supported for queued jobs, with cooperative cancellation for running handlers.
-- Structured metrics cover queue depth, worker utilization, job latency (p50/p95), retries, timeouts, and dead-letter rate. Logs include job ID, handler type, attempt, duration, and outcome.
+- Target observability includes metrics for queue depth, worker utilization, job latency (p50/p95), retries, timeouts, and dead-letter rate; these metrics and alerting remain production-hardening work. Current structured logs include job ID, handler type, attempt, duration, and outcome.
 
 ## DigitalOcean and delivery pipeline
 
 - Run a stateless API service and separate worker, with managed PostgreSQL and Valkey, on DigitalOcean, grouped in a dedicated DigitalOcean Project. Keep credentials out of source control and inject them using DigitalOcean secrets.
 - Scale API and worker independently using App Platform dedicated-CPU autoscaling with a 70% CPU target and a one-to-three instance range. App Platform currently uses the same target for scaling up and down and does not expose separate 40%/five-minute scale-down settings.
-- Track DigitalOcean infrastructure in Terraform. GitHub Actions validates, tests, and builds on pushes and pull requests. A manually triggered workflow creates a Spaces state bucket and runs Terraform plan/apply; applying requires an explicitly protected GitHub environment and DigitalOcean/Spaces secrets. Managed PostgreSQL and Valkey are firewall-restricted to the App Platform API.
+- Track DigitalOcean infrastructure in Terraform. GitHub Actions validates, tests, and builds on pushes and pull requests. A manually triggered workflow creates a Spaces state bucket and runs Terraform plan/apply; applying requires an explicitly protected GitHub environment and DigitalOcean/Spaces secrets. Managed PostgreSQL and Valkey are firewall-restricted to the App Platform application, which includes both the API service and worker component.
 - Configure database backups, connection limits/pooling, health checks, migrations, and alerting before production traffic.
 
 ## High-load approach
