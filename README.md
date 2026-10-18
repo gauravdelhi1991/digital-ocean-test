@@ -1,5 +1,18 @@
 # Digital Ocean Test
 
+```mermaid
+flowchart LR
+    Client[Client] -->|POST job| API[Job API]
+    API -->|Persist job, schedule and outbox| DB[(PostgreSQL)]
+    Publisher[Outbox publisher and due-time scheduler] -->|Publish due jobs| Queue[(Managed Valkey / BullMQ)]
+    DB --> Publisher
+    Queue -->|Consume| Worker[Job workers]
+    Worker -->|Attempts, results, dead letters| DB
+    Client -->|GET job status| API
+    Operator[Operator with bearer token] -->|Depth, drain/resume, cancel| API
+    API -->|Inspect and control queue| Queue
+```
+
 A TypeScript REST API and separate DigitalOcean App Platform worker that durably accept jobs in PostgreSQL, publish them to a BullMQ queue through a transactional outbox, execute supported job types, and persist results and exhausted failures. DigitalOcean Functions are not used.
 
 ## Requirements
@@ -12,6 +25,11 @@ A TypeScript REST API and separate DigitalOcean App Platform worker that durably
 
 1. Create a PostgreSQL database named `jobs`.
 2. Copy `.env.example` to `.env` and set `DATABASE_URL` to your PostgreSQL connection string.
+   Set `REDIS_URL` and an `OPERATOR_TOKEN` containing at least 32 random characters for local operation. Generate one with:
+
+   ```powershell
+   node -p "require('node:crypto').randomBytes(32).toString('hex')"
+   ```
 3. Install dependencies and apply the schema:
 
    ```powershell
@@ -37,6 +55,20 @@ Invoke-RestMethod -Method Post -Uri http://localhost:3000/jobs `
 
 `payload` must be a JSON object. The initial worker supports the explicit example type `"example"`; its result contains the submitted payload. `priority` defaults to `0` and must be between `-100` and `100`; `maxRetries` defaults to `3` and must be between `0` and `20`; `timeoutMs` defaults to `30000` and must be between `100` and `3600000`. A successful request returns HTTP `201` and a generated job ID with status `accepted`, only after both the job and its outbox intent are committed to PostgreSQL. The publisher later marks it `queued` only after Redis accepts the BullMQ message.
 
+To delay a one-off job, include `scheduledAt` as an ISO 8601 datetime with a timezone offset, for example:
+
+```powershell
+$scheduledAt = (Get-Date).ToUniversalTime().AddMinutes(10).ToString("o")
+$body = @{
+  payload = @{ type = "example"; value = 42 }
+  scheduledAt = $scheduledAt
+} | ConvertTo-Json -Compress
+Invoke-RestMethod -Method Post -Uri http://localhost:3000/jobs `
+  -ContentType 'application/json' -Body $body
+```
+
+The requested time is stored on the job and as the outbox message's `available_at` in the same database transaction. The existing outbox publisher claims only due messages, so a job cannot be published to BullMQ before its scheduled time; polling can make publication slightly later than that time. A past timestamp is treated as immediately due. Until due, the job remains `accepted`, includes `scheduledAt` in status responses, and is included in the queue-depth `delayed` count rather than ready `accepted` work. Cancelling it removes the pending outbox entry. This supports one-off delayed jobs; recurring schedules and their missed/overlap policies are not implemented.
+
 ## Check job status
 
 ```powershell
@@ -44,6 +76,20 @@ Invoke-RestMethod -Method Get -Uri http://localhost:3000/jobs/<job-id>
 ```
 
 The endpoint returns the job payload, current status, attempt count, last error, result, and lifecycle timestamps. It returns HTTP `404` if no job exists with that UUID and HTTP `400` if the ID is malformed. A new job is `accepted` until queue publication succeeds, then `queued` until a worker claims it. Unsupported payload types fail rather than silently succeeding; after exhausting retries, the job becomes `dead-lettered` and a durable record is written to `job_dead_letters`.
+
+## Visibility and operator controls
+
+All operational routes require `Authorization: Bearer <OPERATOR_TOKEN>`. The token is injected into the API at runtime and must be at least 32 characters; do not expose it to clients or commit it.
+
+```powershell
+$headers = @{ Authorization = "Bearer $env:OPERATOR_TOKEN" }
+Invoke-RestMethod -Uri http://localhost:3000/ops/queue-depth -Headers $headers
+Invoke-RestMethod -Method Post -Uri http://localhost:3000/ops/drain -Headers $headers
+Invoke-RestMethod -Method Post -Uri http://localhost:3000/ops/resume -Headers $headers
+Invoke-RestMethod -Method Post -Uri http://localhost:3000/ops/jobs/<job-id>/cancel -Headers $headers
+```
+
+Queue depth reports accepted and queued work, active executions, delayed jobs, dead letters, the age in seconds of the oldest accepted/queued job, and whether the queue is draining. Drain globally pauses new claims; active attempts are allowed to finish and queue publication can continue. Resume re-enables claims. Pending jobs can be cancelled immediately; cancellation of a running job is cooperative and its handler must honor the provided `AbortSignal`. Terminal jobs cannot be cancelled.
 
 ## Migrations, tests, and build
 
@@ -77,8 +123,8 @@ The configuration uses single-node PostgreSQL and Valkey plans (`db-s-1vcpu-1gb`
 ### One-time GitHub and DigitalOcean setup
 
 1. Connect `gauravdelhi1991/digital-ocean-test` to DigitalOcean App Platform in the DigitalOcean control panel. This authorizes App Platform to build the private GitHub repository. Terraform creates a DigitalOcean project named `Digital Ocean Test` and assigns the API, PostgreSQL, and Valkey resources to it.
-2. Create a persistent DigitalOcean API token and a Spaces access key in the control panel. Add them as GitHub Actions repository secrets named `DIGITALOCEAN_TOKEN`, `DO_SPACES_ACCESS_KEY_ID`, and `DO_SPACES_SECRET_ACCESS_KEY`. Do not paste or commit credentials.
-3. In GitHub **Settings → Environments**, create `digitalocean-production` restricted to the `main` branch and `digitalocean-candidate` restricted to `feature/*`. These branch restrictions are not approval gates. GitHub Free does not offer required reviewers for private repositories. The workflow therefore requires a separate, manually dispatched apply run with explicit confirmation; this is a deliberate operator action, not an independent reviewer approval.
+2. Create a persistent DigitalOcean API token and a Spaces access key in the control panel. Add `DIGITALOCEAN_TOKEN`, `DO_SPACES_ACCESS_KEY_ID`, and `DO_SPACES_SECRET_ACCESS_KEY` as GitHub Actions repository secrets. Generate a separate random operator token of at least 32 characters with `node -p "require('node:crypto').randomBytes(32).toString('hex')"`; add it as an `OPERATOR_TOKEN` secret to both deployment environments in the next step. Do not paste or commit credentials.
+3. In GitHub **Settings → Environments**, create `digitalocean-production` restricted to the `main` branch and `digitalocean-candidate` restricted to `feature/*`. Add `OPERATOR_TOKEN` to the environment used for the deployment (candidate for feature branches, production for `main`). These branch restrictions are not approval gates. GitHub Free does not offer required reviewers for private repositories. The workflow therefore requires a separate, manually dispatched apply run with explicit confirmation; this is a deliberate operator action, not an independent reviewer approval.
 
 ### Provision
 

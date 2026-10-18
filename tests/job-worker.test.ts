@@ -20,14 +20,17 @@ const sampleJob: Job = {
   updatedAt: "2026-10-17T00:00:00.000Z",
   startedAt: "2026-10-17T00:00:00.000Z",
   completedAt: null,
+  cancellationRequestedAt: null,
 };
 
 function createStore(job: Job | null = sampleJob) {
   const store: WorkerJobStore = {
     startJobAttempt: vi.fn(async () => job),
-    markJobRetryable: vi.fn(async () => {}),
-    markJobSucceeded: vi.fn(async () => {}),
-    markJobDeadLettered: vi.fn(async () => {}),
+    markJobRetryable: vi.fn(async () => "retryable" as const),
+    markJobSucceeded: vi.fn(async () => "succeeded" as const),
+    markJobDeadLettered: vi.fn(async () => "dead-lettered" as const),
+    isCancellationRequested: vi.fn(async () => false),
+    markJobCancelled: vi.fn(async () => {}),
   };
   return store;
 }
@@ -74,6 +77,26 @@ describe("job worker", () => {
     expect(store.markJobDeadLettered).not.toHaveBeenCalled();
   });
 
+  it("acknowledges a retryable failure when cancellation wins the persistence race", async () => {
+    const job = { ...sampleJob, attemptCount: 1, maxRetries: 2 };
+    const store = createStore(job);
+    vi.mocked(store.markJobRetryable).mockResolvedValue("cancelled");
+
+    await expect(
+      executeQueuedJob(
+        job.id,
+        store,
+        { error: vi.fn() },
+        { example: () => Promise.reject(new Error("temporary failure")) },
+      ),
+    ).resolves.toBeNull();
+
+    expect(store.markJobRetryable).toHaveBeenCalledWith(
+      job.id,
+      "temporary failure",
+    );
+  });
+
   it("writes an exhausted failure to the dead-letter store", async () => {
     const job = { ...sampleJob, attemptCount: 3, maxRetries: 2 };
     const store = createStore(job);
@@ -93,6 +116,26 @@ describe("job worker", () => {
       "permanent failure",
     );
     expect(store.markJobRetryable).not.toHaveBeenCalled();
+  });
+
+  it("does not dead-letter a job when cancellation wins the persistence race", async () => {
+    const job = { ...sampleJob, attemptCount: 3, maxRetries: 2 };
+    const store = createStore(job);
+    vi.mocked(store.markJobDeadLettered).mockResolvedValue("cancelled");
+
+    await expect(
+      executeQueuedJob(
+        job.id,
+        store,
+        { error: vi.fn() },
+        { example: () => Promise.reject(new Error("permanent failure")) },
+      ),
+    ).resolves.toBeNull();
+
+    expect(store.markJobDeadLettered).toHaveBeenCalledWith(
+      job.id,
+      "permanent failure",
+    );
   });
 
   it("fails unsupported job types rather than silently succeeding", async () => {
@@ -143,5 +186,38 @@ describe("job worker", () => {
 
     await expect(executeQueuedJob(sampleJob.id, store, logger)).resolves.toBeNull();
     expect(store.markJobSucceeded).not.toHaveBeenCalled();
+  });
+
+  it("aborts a running handler when cooperative cancellation is requested", async () => {
+    const store = createStore();
+    vi.mocked(store.isCancellationRequested)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+    const logger = { error: vi.fn() };
+    let signal: AbortSignal | undefined;
+
+    await expect(
+      executeQueuedJob(
+        sampleJob.id,
+        store,
+        logger,
+        {
+          example: (_payload, context) => {
+            signal = context.signal;
+            return new Promise((_, reject) => {
+              context.signal.addEventListener(
+                "abort",
+                () => reject(new Error("handler aborted")),
+                { once: true },
+              );
+            });
+          },
+        },
+      ),
+    ).resolves.toBeNull();
+
+    expect(signal?.aborted).toBe(true);
+    expect(store.markJobCancelled).toHaveBeenCalledWith(sampleJob.id);
+    expect(store.markJobRetryable).not.toHaveBeenCalled();
   });
 });

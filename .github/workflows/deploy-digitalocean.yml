@@ -52,8 +52,10 @@ jobs:
       inputs.operation == 'plan' &&
       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/feature/'))
     runs-on: ubuntu-latest
+    environment: ${{ github.ref == 'refs/heads/main' && 'digitalocean-production' || 'digitalocean-candidate' }}
     env:
       TF_VAR_digitalocean_token: ${{ secrets.DIGITALOCEAN_TOKEN }}
+      TF_VAR_operator_token: ${{ secrets.OPERATOR_TOKEN }}
       AWS_ACCESS_KEY_ID: ${{ secrets.DO_SPACES_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.DO_SPACES_SECRET_ACCESS_KEY }}
       AWS_DEFAULT_REGION: us-east-1
@@ -68,6 +70,7 @@ jobs:
           DEPLOYMENT_BRANCH: ${{ inputs.deployment_branch }}
         run: |
           test -n "$TF_VAR_digitalocean_token" || { echo "Missing DIGITALOCEAN_TOKEN secret"; exit 1; }
+          test -n "$TF_VAR_operator_token" || { echo "Missing OPERATOR_TOKEN secret"; exit 1; }
           test -n "$AWS_ACCESS_KEY_ID" || { echo "Missing DO_SPACES_ACCESS_KEY_ID secret"; exit 1; }
           test -n "$AWS_SECRET_ACCESS_KEY" || { echo "Missing DO_SPACES_SECRET_ACCESS_KEY secret"; exit 1; }
           git check-ref-format --branch "$DEPLOYMENT_BRANCH" || {
@@ -124,6 +127,7 @@ jobs:
     environment: ${{ github.ref == 'refs/heads/main' && 'digitalocean-production' || 'digitalocean-candidate' }}
     env:
       TF_VAR_digitalocean_token: ${{ secrets.DIGITALOCEAN_TOKEN }}
+      TF_VAR_operator_token: ${{ secrets.OPERATOR_TOKEN }}
       AWS_ACCESS_KEY_ID: ${{ secrets.DO_SPACES_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.DO_SPACES_SECRET_ACCESS_KEY }}
       AWS_DEFAULT_REGION: us-east-1

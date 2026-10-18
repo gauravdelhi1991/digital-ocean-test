@@ -11,6 +11,7 @@ import { createJobWorker } from "../../src/job-worker";
 import { PostgresJobStore, type OutboxStore } from "../../src/jobs";
 import { OutboxPublisher } from "../../src/outbox-publisher";
 import { runMigrations } from "../../src/migration-runner";
+import { createQueueOperations } from "../../src/queue-operations";
 import type { JobQueuePublisher } from "../../src/outbox-publisher";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -26,6 +27,7 @@ describe.skipIf(!databaseUrl || !redisUrl)("transactional outbox integration", (
   let workerQueuePublisher: JobQueuePublisher;
   let queuePublisher: JobQueuePublisher;
   let jobWorker: ReturnType<typeof createJobWorker>;
+  let queueOperations: ReturnType<typeof createQueueOperations>;
 
   function storeForJob(jobId: string): OutboxStore {
     return {
@@ -51,12 +53,19 @@ describe.skipIf(!databaseUrl || !redisUrl)("transactional outbox integration", (
     queuePublisher = createJobQueuePublisher(redisUrl, queueName);
     workerQueuePublisher = createJobQueuePublisher(redisUrl, workerQueueName);
     await runMigrations(pool);
+    queueOperations = createQueueOperations(
+      redisUrl,
+      store,
+      { warn: vi.fn() },
+      queueName,
+    );
     jobWorker = createJobWorker(redisUrl, store, console, workerQueueName, 1);
     await jobWorker.waitUntilReady();
   });
 
   afterAll(async () => {
     await jobWorker.close();
+    await queueOperations.close();
     await queue.obliterate({ force: true });
     await workerQueue.obliterate({ force: true });
     await queue.close();
@@ -113,6 +122,55 @@ describe.skipIf(!databaseUrl || !redisUrl)("transactional outbox integration", (
     }
   });
 
+  it("does not publish a scheduled job before its due time", async () => {
+    const scheduledAt = new Date(Date.now() + 60_000);
+    const job = await store.createJob({
+      payload: { marker: randomUUID() },
+      priority: 0,
+      maxRetries: 0,
+      timeoutMs: 30_000,
+      scheduledAt,
+    });
+
+    try {
+      expect(job.scheduledAt).toBe(scheduledAt.toISOString());
+      await expect(
+        pool.query(
+          "SELECT available_at FROM job_outbox WHERE job_id = $1",
+          [job.id],
+        ),
+      ).resolves.toMatchObject({
+        rows: [expect.objectContaining({ available_at: scheduledAt })],
+      });
+
+      const publisher = new OutboxPublisher(
+        storeForJob(job.id),
+        queuePublisher,
+        console,
+      );
+      await expect(publisher.publishNext()).resolves.toBe(false);
+      await expect(queue.getJob(job.id)).resolves.toBeUndefined();
+      await expect(store.getJob(job.id)).resolves.toMatchObject({
+        status: "accepted",
+        scheduledAt: scheduledAt.toISOString(),
+      });
+
+      await pool.query(
+        "UPDATE job_outbox SET available_at = NOW() WHERE job_id = $1",
+        [job.id],
+      );
+      await expect(publisher.publishNext()).resolves.toBe(true);
+      await expect(queue.getJob(job.id)).resolves.toBeDefined();
+      await expect(store.getJob(job.id)).resolves.toMatchObject({
+        status: "queued",
+        scheduledAt: scheduledAt.toISOString(),
+      });
+    } finally {
+      await (await queue.getJob(job.id))?.remove();
+      await pool.query("DELETE FROM jobs WHERE id = $1", [job.id]);
+    }
+  });
+
   it("reports accepted then queued through the public job status route", async () => {
     const app = buildApp(store, { logger: false });
     let jobId: string | undefined;
@@ -155,6 +213,58 @@ describe.skipIf(!databaseUrl || !redisUrl)("transactional outbox integration", (
         await (await queue.getJob(jobId))?.remove();
         await pool.query("DELETE FROM jobs WHERE id = $1", [jobId]);
       }
+    }
+  });
+
+  it("reports queue depth and globally drains and resumes work", async () => {
+    const jobId = randomUUID();
+    await queue.add("execute", { jobId }, { jobId });
+
+    try {
+      const beforeDrain = await queueOperations.getQueueDepth();
+      expect(beforeDrain.queued).toBeGreaterThanOrEqual(1);
+      expect(beforeDrain.draining).toBe(false);
+
+      await queueOperations.drain();
+      const draining = await queueOperations.getQueueDepth();
+      expect(draining.draining).toBe(true);
+      expect(draining.queued).toBeGreaterThanOrEqual(1);
+
+      await queueOperations.resume();
+      expect((await queueOperations.getQueueDepth()).draining).toBe(false);
+    } finally {
+      await queueOperations.resume();
+      await (await queue.getJob(jobId))?.remove();
+    }
+  });
+
+  it("cancels a queued job and removes its BullMQ entry", async () => {
+    const job = await store.createJob({
+      payload: { type: "example", marker: randomUUID() },
+      priority: 0,
+      maxRetries: 0,
+      timeoutMs: 30_000,
+    });
+
+    try {
+      const publisher = new OutboxPublisher(
+        storeForJob(job.id),
+        queuePublisher,
+        console,
+      );
+      await expect(publisher.publishNext()).resolves.toBe(true);
+
+      await expect(queueOperations.cancelJob(job.id)).resolves.toEqual({
+        outcome: "cancelled",
+        queueCleanup: "removed",
+      });
+      await expect(store.getJob(job.id)).resolves.toMatchObject({
+        status: "cancelled",
+      });
+      await expect(queue.getJob(job.id)).resolves.toBeUndefined();
+    } finally {
+      await (await queue.getJob(job.id))?.remove();
+      await pool.query("DELETE FROM jobs WHERE id = $1", [job.id]);
     }
   });
 

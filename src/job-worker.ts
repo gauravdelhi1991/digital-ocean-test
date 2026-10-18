@@ -28,6 +28,14 @@ const defaultHandlers: JobHandlerRegistry = {
 };
 
 const maximumRetryDelayMs = 60_000;
+const cancellationCheckIntervalMs = 500;
+
+class JobCancellationRequestedError extends Error {
+  constructor() {
+    super("Job cancellation requested");
+    this.name = "JobCancellationRequestedError";
+  }
+}
 
 export function executionRetryDelayMs(
   attempt: number,
@@ -53,9 +61,14 @@ function errorMessage(error: unknown): string {
 async function runWithTimeout(
   job: Job,
   handler: JobHandler,
+  isCancellationRequested: () => Promise<boolean>,
 ): Promise<unknown> {
   const controller = new AbortController();
   let timeout: ReturnType<typeof setTimeout> | undefined;
+  let cancellationCheck: ReturnType<typeof setInterval> | undefined;
+  let cancellationCheckInFlight = false;
+  let cancellationRequested = false;
+  let cancellationCheckError: unknown;
   const execution = Promise.resolve().then(() =>
     handler(job.payload, {
       jobId: job.id,
@@ -69,12 +82,52 @@ async function runWithTimeout(
       reject(new Error(`Job execution timed out after ${job.timeoutMs}ms`));
     }, job.timeoutMs);
   });
+  const checkCancellation = async () => {
+    if (cancellationCheckInFlight || cancellationRequested || cancellationCheckError) {
+      return;
+    }
+    cancellationCheckInFlight = true;
+    try {
+      if (await isCancellationRequested()) {
+        cancellationRequested = true;
+        controller.abort();
+      }
+    } catch (error) {
+      cancellationCheckError = error;
+      controller.abort();
+    } finally {
+      cancellationCheckInFlight = false;
+    }
+  };
+  void checkCancellation();
+  cancellationCheck = setInterval(
+    () => void checkCancellation(),
+    cancellationCheckIntervalMs,
+  );
 
   try {
-    return await Promise.race([execution, timeoutPromise]);
+    const result = await Promise.race([execution, timeoutPromise]);
+    if (cancellationCheckError) {
+      throw cancellationCheckError;
+    }
+    if (cancellationRequested) {
+      throw new JobCancellationRequestedError();
+    }
+    return result;
+  } catch (error) {
+    if (cancellationRequested) {
+      throw new JobCancellationRequestedError();
+    }
+    if (cancellationCheckError) {
+      throw cancellationCheckError;
+    }
+    throw error;
   } finally {
     if (timeout) {
       clearTimeout(timeout);
+    }
+    if (cancellationCheck) {
+      clearInterval(cancellationCheck);
     }
   }
 }
@@ -97,16 +150,30 @@ export async function executeQueuedJob(
     const error = new Error(
       `Unsupported job payload type: ${String(handlerType ?? "undefined")}`,
     );
-    await persistFailure(job, error, store, logger);
+    const cancelled = await persistFailure(job, error, store, logger);
+    if (cancelled) {
+      return null;
+    }
     throw error;
   }
 
   try {
-    const result = await runWithTimeout(job, handler);
-    await store.markJobSucceeded(job.id, result);
-    return result;
+    const result = await runWithTimeout(
+      job,
+      handler,
+      () => store.isCancellationRequested(job.id),
+    );
+    const completion = await store.markJobSucceeded(job.id, result);
+    return completion === "cancelled" ? null : result;
   } catch (error) {
-    await persistFailure(job, error, store, logger);
+    if (error instanceof JobCancellationRequestedError) {
+      await store.markJobCancelled(job.id);
+      return null;
+    }
+    const cancelled = await persistFailure(job, error, store, logger);
+    if (cancelled) {
+      return null;
+    }
     throw error;
   }
 }
@@ -116,14 +183,17 @@ async function persistFailure(
   error: unknown,
   store: WorkerJobStore,
   logger: WorkerLogger,
-): Promise<void> {
+): Promise<boolean> {
   const message = errorMessage(error).slice(0, 4000);
   try {
-    if (job.attemptCount <= job.maxRetries) {
-      await store.markJobRetryable(job.id, message);
-    } else {
-      await store.markJobDeadLettered(job.id, message);
+    if (await store.isCancellationRequested(job.id)) {
+      await store.markJobCancelled(job.id);
+      return true;
     }
+    if (job.attemptCount <= job.maxRetries) {
+      return (await store.markJobRetryable(job.id, message)) === "cancelled";
+    }
+    return (await store.markJobDeadLettered(job.id, message)) === "cancelled";
   } catch (persistenceError) {
     logger.error(
       { err: persistenceError, jobId: job.id, executionError: message },
