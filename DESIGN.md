@@ -6,7 +6,7 @@ Build a production-ready REST API for accepting jobs, executing them asynchronou
 
 ## Architecture
 
-Use TypeScript with Fastify for the HTTP API, PostgreSQL as the durable job registry, result store, and dead-letter audit, Valkey (Redis-compatible) with BullMQ for asynchronous delivery, and separate worker and scheduler processes. Host the API as an App Platform service and execute queued work in a separate App Platform worker component. Keep infrastructure in Terraform and use GitHub Actions for CI, remote-state bootstrap, and manually triggered Terraform plans/applies. Store Terraform state in a private DigitalOcean Spaces bucket. DigitalOcean Functions are not part of this design.
+Use TypeScript with Fastify for the HTTP API, PostgreSQL as the durable job registry, result store, and dead-letter audit, Valkey (Redis-compatible) with BullMQ for asynchronous delivery, and separate worker processes. The API's durable outbox publisher also schedules one-off delayed jobs; recurring schedules may use a separate scheduler when implemented. Host the API as an App Platform service and execute queued work in a separate App Platform worker component. Keep infrastructure in Terraform and use GitHub Actions for CI, remote-state bootstrap, and manually triggered Terraform plans/applies. Store Terraform state in a private DigitalOcean Spaces bucket. DigitalOcean Functions are not part of this design.
 
 ```text
 Client
@@ -31,7 +31,7 @@ Fastify API ---- transaction ----> PostgreSQL job registry
                                               v
                                   Dead-lettered job in PostgreSQL
 
-Scheduler (later) ---> PostgreSQL schedules ---> Redis delayed/recurring jobs
+PostgreSQL outbox (available_at) ---> Outbox publisher (claims due jobs) ---> Redis / BullMQ
 ```
 
 ## Job lifecycle and delivery semantics
@@ -46,7 +46,7 @@ Scheduler (later) ---> PostgreSQL schedules ---> Redis delayed/recurring jobs
 
 Initial API:
 
-- `POST /jobs`: validate a JSON object payload and optional `priority`, `maxRetries`, and `timeoutMs`; persist it and return its ID with `status: accepted`.
+- `POST /jobs`: validate a JSON object payload and optional `priority`, `maxRetries`, `timeoutMs`, and ISO 8601 `scheduledAt`; persist it and return its ID with `status: accepted`.
 - `GET /jobs/{id}`: return the stored job, including its current state, attempt count, last error, result, and lifecycle timestamps; return `404` for an unknown UUID.
 - `GET /health/live` and `GET /health/ready`: process liveness and database readiness.
 
@@ -58,13 +58,13 @@ Operational API (operator bearer token required):
 - `POST /ops/drain` and `POST /ops/resume`: globally stop/resume new worker claims while active jobs finish.
 - `POST /ops/jobs/{id}/cancel`: cancel pending work or request cooperative cancellation of a running handler.
 
-The PostgreSQL `jobs` table stores payload, scheduling/execution options, status, attempt count, last error, result, and timestamps. Jobs remain `accepted` until publication succeeds, then remain `queued` until a worker processes them. Exhausted failures are stored transactionally in `job_dead_letters`; schedule tables are added in the scheduling milestone.
+The PostgreSQL `jobs` table stores payload, scheduling/execution options, status, attempt count, last error, result, and timestamps. Jobs remain `accepted` until publication succeeds, then remain `queued` until a worker processes them. For one-off delayed execution, `scheduled_at` and the outbox's `available_at` are committed with the job; the publisher only claims due messages. Exhausted failures are stored transactionally in `job_dead_letters`.
 
 ## Retry, timeout, scheduling, and operations
 
 - `maxRetries` counts retries after the initial attempt. Retry delay is capped exponential backoff with jitter.
 - A timeout applies to each individual execution attempt.
-- Delayed jobs become eligible no earlier than their scheduled time. A separate scheduler process reads durable schedule definitions and publishes due work; cron/recurring definitions and execution history live in PostgreSQL.
+- One-off delayed jobs become eligible no earlier than `scheduledAt`. The outbox publisher is the recoverable scheduler: it polls durable PostgreSQL outbox entries and publishes only when `available_at` is due. Recurring definitions, execution history, and missed/overlap policies remain future work.
 - Drain stops workers claiming new jobs while in-flight jobs finish. Cancellation is supported for queued jobs, with cooperative cancellation for running handlers.
 - Structured metrics cover queue depth, worker utilization, job latency (p50/p95), retries, timeouts, and dead-letter rate. Logs include job ID, handler type, attempt, duration, and outcome.
 
@@ -88,6 +88,6 @@ Scale worker replicas independently according to backlog and utilization. Apply 
 5. **Implement independently deployable App Platform workers.** Complete for the initial handler: the separate worker consumes BullMQ messages, persists execution state and results, and has PostgreSQL/Redis integration coverage.
 6. **Add timeouts, retry/backoff, and dead-letter handling.** Complete for the current handler contract: per-attempt timeouts, exponential queue backoff, and durable dead-letter persistence are implemented.
 7. **Add queue visibility and operational controls.** Report backlog depth/lag, support cancellation and drain/resume, and secure operator endpoints.
-8. **Add delayed and recurring scheduling.** Persist schedules, run a recoverable scheduler, publish jobs no earlier than their due time, and define missed/overlapping run behavior.
+8. **Add delayed and recurring scheduling.** One-off delayed execution is implemented with durable `scheduled_at` and outbox `available_at` timestamps. Recurring definitions, execution history, missed/overlapping run behavior, and dedicated scheduler operations remain future work.
 9. **Add observability and production hardening.** Emit structured logs and required metrics; add alerts, retention, backup/recovery, load, and failure tests.
 10. **Scale and validate the DigitalOcean deployment.** Independently scale API and workers, exercise autoscaling/backpressure, and document deployment, configuration, operations, and delivery guarantees.

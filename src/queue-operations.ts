@@ -45,7 +45,7 @@ export function queueDepthFromMetrics(
       (queueCounts.paused ?? 0) +
       (queueCounts.prioritized ?? 0),
     running: Math.max(database.running, queueCounts.active ?? 0),
-    delayed: queueCounts.delayed ?? 0,
+    delayed: database.delayed + (queueCounts.delayed ?? 0),
     deadLettered: database.deadLettered,
     backlogLagSeconds: database.backlogLagSeconds,
     draining,

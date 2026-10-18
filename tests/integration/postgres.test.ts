@@ -50,6 +50,7 @@ describe.skipIf(!databaseUrl)("PostgreSQL job persistence", () => {
         startedAt: null,
         completedAt: null,
         cancellationRequestedAt: null,
+        scheduledAt: null,
       });
       expect(job).toHaveProperty("createdAt");
       expect(job).toHaveProperty("updatedAt");

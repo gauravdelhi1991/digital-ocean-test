@@ -14,6 +14,12 @@ const submitJobSchema = z
     priority: z.number().int().min(-100).max(100).default(0),
     maxRetries: z.number().int().min(0).max(20).default(3),
     timeoutMs: z.number().int().min(100).max(3_600_000).default(30_000),
+    scheduledAt: z
+      .string()
+      .datetime({ offset: true })
+      .transform((value) => new Date(value))
+      .optional()
+      .transform((value) => value ?? null),
   })
   .strict();
 

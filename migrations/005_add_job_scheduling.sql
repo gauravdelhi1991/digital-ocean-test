@@ -1,0 +1,2 @@
+ALTER TABLE jobs
+    ADD COLUMN scheduled_at TIMESTAMPTZ;

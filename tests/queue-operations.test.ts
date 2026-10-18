@@ -7,6 +7,7 @@ describe("queue depth", () => {
       queueDepthFromMetrics(
         {
           accepted: 2,
+          delayed: 3,
           running: 1,
           deadLettered: 4,
           backlogLagSeconds: 15.5,
@@ -24,7 +25,7 @@ describe("queue depth", () => {
       accepted: 2,
       queued: 15,
       running: 2,
-      delayed: 6,
+      delayed: 9,
       deadLettered: 4,
       backlogLagSeconds: 15.5,
       draining: true,
@@ -36,6 +37,7 @@ describe("queue depth", () => {
       queueDepthFromMetrics(
         {
           accepted: 0,
+          delayed: 0,
           running: 0,
           deadLettered: 0,
           backlogLagSeconds: null,

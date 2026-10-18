@@ -2,6 +2,7 @@ import { buildApp } from "./app";
 import { createDatabasePool } from "./database";
 import { createJobQueuePublisher } from "./job-queue";
 import { PostgresJobStore } from "./jobs";
+import { runMigrations } from "./migration-runner";
 import { OutboxPublisher } from "./outbox-publisher";
 import { createQueueOperations } from "./queue-operations";
 
@@ -20,6 +21,12 @@ async function main(): Promise<void> {
   }
 
   const pool = createDatabasePool(connectionString);
+  try {
+    await runMigrations(pool);
+  } catch (error) {
+    await pool.end();
+    throw error;
+  }
   const store = new PostgresJobStore(pool);
   const queueOperations = createQueueOperations(redisConnectionString, store, {
     warn(fields, message) {

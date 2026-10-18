@@ -10,6 +10,7 @@ const queueDepth = {
   running: 1,
   delayed: 3,
   deadLettered: 5,
+  delayed: 3,
   backlogLagSeconds: 12,
   draining: false,
 };
@@ -32,6 +33,7 @@ function createStore(overrides: Partial<JobStore> = {}) {
   const checkConnection = vi.fn(async () => {});
   const getQueueDatabaseMetrics = vi.fn(async () => ({
     accepted: 0,
+    delayed: 0,
     running: 0,
     deadLettered: 0,
     backlogLagSeconds: null,
@@ -93,6 +95,7 @@ describe("job submission API", () => {
       priority: 0,
       maxRetries: 3,
       timeoutMs: 30_000,
+      scheduledAt: null,
     });
     await app.close();
   });
@@ -118,7 +121,30 @@ describe("job submission API", () => {
       priority: 10,
       maxRetries: 5,
       timeoutMs: 60_000,
+      scheduledAt: null,
     });
+    await app.close();
+  });
+
+  it("accepts an ISO scheduledAt timestamp", async () => {
+    const { store, createJob } = createStore();
+    const app = buildApp(store, { logger: false });
+    const scheduledAt = "2026-10-20T12:30:00.000Z";
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/jobs",
+      payload: {
+        payload: { operation: "export" },
+        scheduledAt,
+      },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json().scheduledAt).toBe(scheduledAt);
+    expect(createJob).toHaveBeenCalledWith(
+      expect.objectContaining({ scheduledAt: new Date(scheduledAt) }),
+    );
     await app.close();
   });
 
@@ -203,6 +229,7 @@ describe("job submission API", () => {
     [{ payload: [] }, "payload must be an object"],
     [{ payload: { operation: "import" }, maxRetries: -1 }, "retry limit must be valid"],
     [{ payload: { operation: "import" }, timeoutMs: 99 }, "timeout must be valid"],
+    [{ payload: { operation: "import" }, scheduledAt: "next Tuesday" }, "Invalid job submission"],
     [{ payload: { operation: "import" }, unexpected: true }, "unknown fields must be rejected"],
   ])("rejects invalid submissions (%s)", async (payload) => {
     const { store, createJob } = createStore();

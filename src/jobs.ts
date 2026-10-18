@@ -6,6 +6,7 @@ export interface NewJob {
   priority: number;
   maxRetries: number;
   timeoutMs: number;
+  scheduledAt?: Date | null;
 }
 
 export type JobStatus =
@@ -32,10 +33,12 @@ export interface Job {
   startedAt: string | null;
   completedAt: string | null;
   cancellationRequestedAt: string | null;
+  scheduledAt: string | null;
 }
 
 export interface QueueDatabaseMetrics {
   accepted: number;
+  delayed: number;
   running: number;
   deadLettered: number;
   backlogLagSeconds: number | null;
@@ -92,12 +95,13 @@ interface JobRow {
   started_at: Date | null;
   completed_at: Date | null;
   cancellation_requested_at: Date | null;
+  scheduled_at: Date | null;
 }
 
 const jobColumns = `
   id, payload, priority, max_retries, timeout_ms, attempt_count, status,
   last_error, result, created_at, updated_at, started_at, completed_at,
-  cancellation_requested_at
+  cancellation_requested_at, scheduled_at
 `;
 
 function mapJob(row: JobRow): Job {
@@ -117,6 +121,7 @@ function mapJob(row: JobRow): Job {
     completedAt: row.completed_at?.toISOString() ?? null,
     cancellationRequestedAt:
       row.cancellation_requested_at?.toISOString() ?? null,
+    scheduledAt: row.scheduled_at?.toISOString() ?? null,
   };
 }
 
@@ -128,17 +133,30 @@ export class PostgresJobStore implements JobStore, OutboxStore, WorkerJobStore {
     try {
       await client.query("BEGIN");
       const result = await client.query<JobRow>(
-        `INSERT INTO jobs (id, payload, priority, max_retries, timeout_ms)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO jobs (
+           id, payload, priority, max_retries, timeout_ms, scheduled_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING ${jobColumns}`,
-        [randomUUID(), input.payload, input.priority, input.maxRetries, input.timeoutMs],
+        [
+          randomUUID(),
+          input.payload,
+          input.priority,
+          input.maxRetries,
+          input.timeoutMs,
+          input.scheduledAt ?? null,
+        ],
       );
       const row = result.rows[0];
       if (!row) {
         throw new Error("PostgreSQL did not return the inserted job");
       }
 
-      await client.query("INSERT INTO job_outbox (job_id) VALUES ($1)", [row.id]);
+      await client.query(
+        `INSERT INTO job_outbox (job_id, available_at)
+         VALUES ($1, COALESCE($2, NOW()))`,
+        [row.id, input.scheduledAt ?? null],
+      );
       await client.query("COMMIT");
       return mapJob(row);
     } catch (error) {
@@ -165,21 +183,34 @@ export class PostgresJobStore implements JobStore, OutboxStore, WorkerJobStore {
   async getQueueDatabaseMetrics(): Promise<QueueDatabaseMetrics> {
     const result = await this.pool.query<{
       accepted: string;
+      delayed: string;
       running: string;
       dead_lettered: string;
       backlog_lag_seconds: number | null;
     }>(`
       SELECT
-        COUNT(*) FILTER (WHERE status = 'accepted')::text AS accepted,
+        COUNT(*) FILTER (
+          WHERE status = 'accepted'
+            AND (scheduled_at IS NULL OR scheduled_at <= NOW())
+        )::text AS accepted,
+        COUNT(*) FILTER (
+          WHERE status = 'accepted' AND scheduled_at > NOW()
+        )::text AS delayed,
         COUNT(*) FILTER (WHERE status = 'running')::text AS running,
         COUNT(*) FILTER (WHERE status = 'dead-lettered')::text AS dead_lettered,
         CASE
-          WHEN COUNT(*) FILTER (WHERE status IN ('accepted', 'queued')) = 0
+          WHEN COUNT(*) FILTER (
+            WHERE status IN ('accepted', 'queued')
+              AND (scheduled_at IS NULL OR scheduled_at <= NOW())
+          ) = 0
             THEN NULL
           ELSE GREATEST(
             0,
             EXTRACT(EPOCH FROM NOW() - MIN(created_at)
-              FILTER (WHERE status IN ('accepted', 'queued')))
+              FILTER (
+                WHERE status IN ('accepted', 'queued')
+                  AND (scheduled_at IS NULL OR scheduled_at <= NOW())
+              ))
           )
         END AS backlog_lag_seconds
       FROM jobs
@@ -190,6 +221,7 @@ export class PostgresJobStore implements JobStore, OutboxStore, WorkerJobStore {
     }
     return {
       accepted: Number(row.accepted),
+      delayed: Number(row.delayed),
       running: Number(row.running),
       deadLettered: Number(row.dead_lettered),
       backlogLagSeconds:
