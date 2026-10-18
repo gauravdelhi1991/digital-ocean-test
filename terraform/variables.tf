@@ -28,6 +28,18 @@ variable "database_size" {
   default     = "db-s-1vcpu-1gb"
 }
 
+variable "queue_cluster_name" {
+  description = "Name of the managed Valkey queue cluster."
+  type        = string
+  default     = "digital-ocean-test-queue"
+}
+
+variable "queue_size" {
+  description = "Managed Valkey node size."
+  type        = string
+  default     = "db-s-1vcpu-1gb"
+}
+
 variable "app_name" {
   description = "Unique name for the DigitalOcean App Platform application."
   type        = string
@@ -40,10 +52,27 @@ variable "app_region" {
   default     = "nyc"
 }
 
-variable "app_instance_size" {
-  description = "App Platform service instance size."
+variable "api_instance_size" {
+  description = "Dedicated-CPU App Platform API service instance size."
   type        = string
-  default     = "apps-s-1vcpu-0.5gb"
+  default     = "apps-d-1vcpu-1gb"
+}
+
+variable "worker_instance_size" {
+  description = "Dedicated-CPU App Platform worker instance size."
+  type        = string
+  default     = "apps-d-1vcpu-1gb"
+}
+
+variable "app_max_instance_count" {
+  description = "Maximum autoscaled instance count for the API and worker."
+  type        = number
+  default     = 3
+
+  validation {
+    condition     = var.app_max_instance_count >= 1 && var.app_max_instance_count <= 250
+    error_message = "app_max_instance_count must be between 1 and 250."
+  }
 }
 
 variable "github_repo" {

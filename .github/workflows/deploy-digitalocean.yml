@@ -18,7 +18,7 @@ on:
         type: string
         default: main
       plan_run_id:
-        description: "For apply only: run ID of a successful plan on this exact main-branch commit and deployment branch."
+        description: "For apply only: run ID of a successful plan on this exact infrastructure-branch commit and deployment branch."
         required: false
         type: string
       confirm_plan:
@@ -48,7 +48,9 @@ concurrency:
 
 jobs:
   plan:
-    if: github.ref == 'refs/heads/main' && inputs.operation == 'plan'
+    if: >-
+      inputs.operation == 'plan' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/feature/'))
     runs-on: ubuntu-latest
     env:
       TF_VAR_digitalocean_token: ${{ secrets.DIGITALOCEAN_TOKEN }}
@@ -114,12 +116,12 @@ jobs:
 
   apply:
     if: >-
-      github.ref == 'refs/heads/main' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/feature/')) &&
       inputs.operation == 'apply' &&
       inputs.confirm_plan == 'yes' &&
       inputs.plan_run_id != ''
     runs-on: ubuntu-latest
-    environment: digitalocean-production
+    environment: ${{ github.ref == 'refs/heads/main' && 'digitalocean-production' || 'digitalocean-candidate' }}
     env:
       TF_VAR_digitalocean_token: ${{ secrets.DIGITALOCEAN_TOKEN }}
       AWS_ACCESS_KEY_ID: ${{ secrets.DO_SPACES_ACCESS_KEY_ID }}
@@ -145,9 +147,8 @@ jobs:
           jq -e \
             --arg sha "$GITHUB_SHA" \
             --arg branch "$GITHUB_REF_NAME" \
-            '.head_branch == "main" and
+            '.head_branch == $branch and
              .head_sha == $sha and
-             .head_branch == $branch and
              .status == "completed" and
              .conclusion == "success" and
              .path == ".github/workflows/deploy-digitalocean.yml"' \
