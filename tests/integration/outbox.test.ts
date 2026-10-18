@@ -258,7 +258,9 @@ describe.skipIf(!databaseUrl || !redisUrl)("transactional outbox integration", (
       expect(result.rows[0]?.status).toBe("queued");
       expect(result.rows[0]?.attempts).toBe(2);
       expect(result.rows[0]?.published_at).toBeInstanceOf(Date);
-      expect(await queue.getJobCounts("waiting")).toMatchObject({ waiting: 1 });
+      expect(await queue.getJobCounts("prioritized")).toMatchObject({
+        prioritized: 1,
+      });
     } finally {
       await (await queue.getJob(job.id))?.remove();
       await pool.query("DELETE FROM jobs WHERE id = $1", [job.id]);
